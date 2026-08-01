@@ -1,0 +1,26 @@
+{
+  "name": "opensync",
+  "version": "1.0.0",
+  "description": "Self-hosted LAN platform for offline games: upload, download, differential save sync",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "node --watch server/index.js",
+    "start": "node server/index.js",
+    "test": "node --test tests/*.test.js",
+    "lint": "node scripts/lint.js",
+    "db:init": "node server/db.js init",
+    "db:migrate": "node server/db.js migrate"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "fflate": "^0.8.2"
+  }
+}
