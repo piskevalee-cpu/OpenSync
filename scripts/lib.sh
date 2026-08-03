@@ -88,6 +88,9 @@ sanitize_input() {
 # safe); falls back to the default when no console is available. Input is
 # sanitized; 'y'/'s' (sì) = yes, 'n' = no, empty = default; anything else
 # re-asks (max 3 tries, then the default wins).
+# NOTE: `read -p` writes the prompt to stderr — the /dev/tty branch must
+# print the prompt with printf >/dev/tty first, or it stays invisible under
+# `curl … | bash` (stdin is a pipe, so the /dev/tty branch is always taken).
 prompt_yes_no() {
   local question="$1" default="${2:-yes}" input tries=0 suffix
   [ "$default" = yes ] && suffix="[Y/n]" || suffix="[y/N]"
@@ -95,7 +98,8 @@ prompt_yes_no() {
     if is_tty 0; then
       read -r -p "$question $suffix: " input || { echo; return 1; }
     elif can_read_tty; then
-      read -r -p "$question $suffix: " input </dev/tty 2>/dev/null || { echo; return 1; }
+      printf '%s' "$question $suffix: " >/dev/tty 2>/dev/null
+      read -r input </dev/tty 2>/dev/null || { printf '\n' >/dev/tty 2>/dev/null; return 1; }
     else
       [ "$default" = "yes" ]
       return

@@ -94,6 +94,9 @@ sanitize_input() {
 # safe); falls back to the default when no console is available. Input is
 # sanitized; 'y'/'s' (sì) = yes, 'n' = no, empty = default; anything else
 # re-asks (max 3 tries, then the default wins).
+# NOTE: `read -p` writes the prompt to stderr — the /dev/tty branch must
+# print the prompt with printf >/dev/tty first, or it stays invisible under
+# `curl … | bash` (stdin is a pipe, so the /dev/tty branch is always taken).
 prompt_yes_no() {
   local question="$1" default="${2:-yes}" input tries=0 suffix
   [ "$default" = yes ] && suffix="[Y/n]" || suffix="[y/N]"
@@ -101,7 +104,8 @@ prompt_yes_no() {
     if is_tty 0; then
       read -r -p "$question $suffix: " input || { echo; return 1; }
     elif can_read_tty; then
-      read -r -p "$question $suffix: " input </dev/tty 2>/dev/null || { echo; return 1; }
+      printf '%s' "$question $suffix: " >/dev/tty 2>/dev/null
+      read -r input </dev/tty 2>/dev/null || { printf '\n' >/dev/tty 2>/dev/null; return 1; }
     else
       [ "$default" = "yes" ]
       return
@@ -127,7 +131,8 @@ prompt_input() {
   if is_tty 0; then
     read -r -p "$prompt" input || return 1
   elif can_read_tty; then
-    read -r -p "$prompt" input </dev/tty 2>/dev/null || return 1
+    printf '%s' "$prompt" >/dev/tty 2>/dev/null
+    read -r input </dev/tty 2>/dev/null || { printf '\n' >/dev/tty 2>/dev/null; return 1; }
   else
     input="$default"
     return 0
@@ -320,7 +325,8 @@ choose_clone_dir() {
         3)
           custom=$(prompt_input "  full path (e.g. /srv/opensync): ")
           if [ -n "$custom" ]; then
-            if mkdir -p "$custom" 2>/dev/null; then
+            custom=${custom%/}
+            if [ -n "$custom" ] && mkdir -p "$custom" 2>/dev/null; then
               INSTALL_BASE="$custom"
               break
             fi

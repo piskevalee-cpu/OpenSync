@@ -189,6 +189,30 @@ test('uninstall: removes storage on "s" (sì) and the whole install dir on y', {
   }
 });
 
+test('install.sh: prompts stay visible under curl|bash (piped stdin + tty)', { skip: !(HAVE_SCRIPT && HAVE_GIT) }, async () => {
+  // Reproduces `curl … | bash`: bash's stdin is a pipe (here /dev/null) so
+  // is_tty 0 is false, but the session has a controlling tty, so prompts
+  // must be printed to /dev/tty explicitly (`read -p` writes to stderr,
+  // which the /dev/tty branch must not discard).
+  const home = mkdtempSync(path.join(tmpdir(), 'os-install-'));
+  const fixture = makeFixture();
+  const port = 31000 + ((process.pid + 400) % 900);
+  try {
+    const r = bash(`printf '3\\n${home}/custom\\nn\\n' | script -qec 'env HOME=${home} PORT=${port} REPO_URL=${fixture} bash install.sh < /dev/null' /dev/null`, {
+      timeout: 240000,
+    });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /full path \(e\.g\. \/srv\/opensync\): /, 'custom-path prompt must be visible');
+    assert.match(r.stdout, /start OpenSync now\? \[Y\/n\]: /, 'start-server prompt must be visible');
+    assert.match(r.stdout, /no problem — OpenSync is installed/);
+    assert.ok(existsSync(path.join(home, 'custom', 'OpenSync', 'package.json')), 'repo must clone into the custom path');
+    assert.ok(!(await healthOk(port)), 'server must NOT start when answered n');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('install.sh: interactive prompts appear and are honored under a pty', { skip: !(HAVE_SCRIPT && HAVE_GIT) }, async () => {
   const home = mkdtempSync(path.join(tmpdir(), 'os-install-'));
   const fixture = makeFixture();
