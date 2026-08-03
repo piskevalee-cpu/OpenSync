@@ -164,7 +164,7 @@ opensync            # live dashboard (fallback: one-shot status)
 | `status` | One-shot status report — pipeline-friendly. |
 | `logs` | Tails the server log (`tail -F`). |
 | `update` | `git pull --ff-only` + `npm install`, then restarts the service only if it was running. |
-| `uninstall` | Stops the server, removes the `opensync` command itself (sudo prompt if needed), and asks whether to also delete all your data in `OPENSYNC_STORAGE`. |
+| `uninstall` | Stops the server, removes the `opensync` command itself (sudo prompt if needed), and asks whether to delete your data in `OPENSYNC_STORAGE` and the whole install directory (both default to no). |
 
 The CLI is a self-managed **PID-file service**: state lives in `storage/opensync.pid` (pid on the first line, port on the second). A service counts as *active* only when the process is alive **and** `GET /api/health` on `127.0.0.1:<port>` returns `{"ok":true}`.
 

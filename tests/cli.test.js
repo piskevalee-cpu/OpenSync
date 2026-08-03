@@ -100,7 +100,7 @@ test('dashboard: intact banner (no cumulative shift), in-place redraw seqs, quit
   assert.match(out, /\x1b\[K/);
   assert.match(out, /\x1b\[\?1049h/);
   assert.match(out, /OpenSync CLI v/);
-  assert.match(out, /lan access\s+http:\/\//);
+  assert.doesNotMatch(out, /lan access/, 'redundant lan access section must be gone');
   assert.match(out, /^\s+port\s+\d+/m);
   assert.match(out, /storage\s+\S+/);
   assert.match(out, /\r?\n███    ███   ███    ███   ███    ███/);
@@ -133,6 +133,58 @@ test('install.sh: non-interactive run — defaults, banner once, server starts a
   } finally {
     bash(`env HOME=${home} PORT=${port} bash ${home}/OpenSync/scripts/cli.sh stop || true`, { timeout: 30000 });
     rmSync(home, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('install.sh: junk answer re-prompts and is not treated as yes', { skip: !(HAVE_SCRIPT && HAVE_GIT) }, async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'os-install-'));
+  const fixture = makeFixture();
+  const port = 31000 + ((process.pid + 300) % 900);
+  try {
+    const r = bash(`printf '1\\njunk\\nn\\n' | script -qec 'env HOME=${home} PORT=${port} REPO_URL=${fixture} bash install.sh' /dev/null`, {
+      timeout: 240000,
+    });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /please answer y or n/, 'invalid input must re-prompt');
+    assert.match(r.stdout, /no problem — OpenSync is installed/);
+    assert.ok(lstatSync(path.join(home, '.local', 'bin', 'opensync')).isSymbolicLink(), 'opensync symlink');
+    assert.ok(!(await healthOk(port)), 'server must NOT start when a junk answer is followed by n');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('dashboard: [l] follows the log and Ctrl+C + enter returns to the dashboard', { skip: !HAVE_SCRIPT }, async () => {
+  const fixture = makeFixture();
+  try {
+    fixtureReady(fixture);
+    writeFileSync(path.join(fixture, 'storage', 'opensync.log'), 'some log line\n');
+    const feed = "(sleep 1; printf l; sleep 1; printf '\\x03'; sleep 0.5; printf '\\nq')";
+    const r = bash(`${feed} | script -qec 'env PORT=30999 bash ${fixture}/scripts/cli.sh' /dev/null`, { timeout: 30000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /some log line/, 'log content must be shown');
+    assert.match(r.stdout, /press enter to return to the dashboard/);
+    assert.ok((r.stdout.match(/OpenSync CLI v/g) || []).length >= 2, 'dashboard must re-render after returning from logs');
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('uninstall: removes storage on "s" (sì) and the whole install dir on y', { skip: !HAVE_SCRIPT }, async () => {
+  const fixture = makeFixture();
+  try {
+    fixtureReady(fixture);
+    writeFileSync(path.join(fixture, 'storage', 'opensync.log'), 'x\n');
+    const r = bash(`printf 's\\ny\\n' | script -qec 'env PATH=/usr/bin:/bin PORT=30998 bash ${fixture}/scripts/cli.sh uninstall' /dev/null`, {
+      timeout: 60000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /opensync uninstalled/);
+    assert.ok(!existsSync(path.join(fixture, 'storage')), 'storage must be deleted on "s"');
+    assert.ok(!existsSync(fixture), 'install directory must be removed on y');
+  } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
 });

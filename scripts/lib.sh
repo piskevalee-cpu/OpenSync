@@ -72,24 +72,48 @@ run_spinner() {
   return "$code"
 }
 
+# sanitize_input <str> — strip ANSI escape sequences (arrow keys pressed while
+# a prompt is pending leak ESC[…] bytes into canonical-mode reads) and trim
+# surrounding whitespace.
+sanitize_input() {
+  local s="$1"
+  s=$(printf '%s' "$s" | LC_ALL=C sed $'s/\033\[[0-9;]*[a-zA-Z]//g')
+  s=${s#"${s%%[![:space:]]*}"}
+  s=${s%"${s##*[![:space:]]}"}
+  printf '%s' "$s"
+}
+
 # prompt_yes_no <question> [default: yes|no]
 # Reads from the terminal when possible (stdin, else /dev/tty — curl|bash
-# safe); falls back to the default when no console is available.
+# safe); falls back to the default when no console is available. Input is
+# sanitized; 'y'/'s' (sì) = yes, 'n' = no, empty = default; anything else
+# re-asks (max 3 tries, then the default wins).
 prompt_yes_no() {
-  local question="$1" default="${2:-yes}" input
-  if is_tty 0; then
-    read -r -p "$question [Y/n]: " input || { echo; return 1; }
-  elif can_read_tty; then
-    read -r -p "$question [Y/n]: " input </dev/tty 2>/dev/null || { echo; return 1; }
-  else
-    [ "$default" = "yes" ]
-    return
-  fi
-  case "$input" in
-    "") [ "$default" = yes ] && return 0 || return 1 ;;
-    [yY]*) return 0 ;;
-    [nN]*) return 1 ;;
-  esac
+  local question="$1" default="${2:-yes}" input tries=0 suffix
+  [ "$default" = yes ] && suffix="[Y/n]" || suffix="[y/N]"
+  while :; do
+    if is_tty 0; then
+      read -r -p "$question $suffix: " input || { echo; return 1; }
+    elif can_read_tty; then
+      read -r -p "$question $suffix: " input </dev/tty 2>/dev/null || { echo; return 1; }
+    else
+      [ "$default" = "yes" ]
+      return
+    fi
+    input=$(sanitize_input "$input")
+    case "$input" in
+      "") [ "$default" = yes ] && return 0 || return 1 ;;
+      [yYsS]*) return 0 ;;
+      [nN]*) return 1 ;;
+    esac
+    tries=$((tries + 1))
+    if [ "$tries" -ge 3 ]; then
+      warn "invalid answer — using default ($default)"
+      [ "$default" = yes ] && return 0 || return 1
+    else
+      warn "please answer y or n — try again"
+    fi
+  done
 }
 
 # print_banner — figlet-style OpenSync ASCII art.

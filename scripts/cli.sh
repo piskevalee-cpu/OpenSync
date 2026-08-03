@@ -227,6 +227,16 @@ cmd_uninstall() {
   if prompt_yes_no "delete all stored data ($STORAGE)?" no; then
     rm -rf "$STORAGE"
   fi
+  if prompt_yes_no "remove the install directory ($ROOT) too?" no; then
+    if [ "$ROOT" = "/" ] || [ "$ROOT" = "$HOME" ] || [ ! -f "$ROOT/scripts/cli.sh" ]; then
+      warn "refusing to remove '$ROOT' (does not look like an OpenSync install dir)"
+    else
+      info "removing $ROOT…"
+      # the script is running from inside $ROOT — cd out first
+      cd /
+      rm -rf "$ROOT" || warn "could not remove $ROOT"
+    fi
+  fi
   ok "opensync uninstalled"
 }
 
@@ -259,12 +269,6 @@ render_screen() {
   esac
 
   while IFS= read -r line; do put "$line"; done < <({
-    echo "  lan access   $(url_for "$PORT")"
-    while read -r ip; do
-      if [ -n "$ip" ]; then
-        printf '              http://%s:%s\n' "$ip" "$PORT"
-      fi
-    done < <(lan_ips)
     printf '  port         %s\n' "$PORT"
     printf '  storage      %s\n' "$STORAGE"
     printf '  repo         %s\n' "$ROOT"
@@ -335,7 +339,13 @@ cmd_dashboard() {
         [lL])
           stty sane
           printf '\033[2J\033[H'
+          # A no-op INT trap: Ctrl+C still kills `tail`, but the shell itself
+          # would otherwise self-signal and exit (a cleared trap is not
+          # enough — non-interactive bash re-raises SIGINT after the child
+          # dies). Restore the real trap when back.
+          trap ':' INT
           cmd_logs || true
+          trap 'exit 130' INT
           printf '\npress enter to return to the dashboard\n'
           read -r _ || true
           stty -icanon -echo
