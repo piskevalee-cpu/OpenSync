@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { DB_PATH, GAMES_ROOT, USERS_ROOT, STORAGE_ROOT } from './config.js';
 
@@ -155,7 +156,7 @@ export function uniqueSlug(name) {
   return slug;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.url)) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const cmd = process.argv[2];
   if (cmd === 'init' || cmd === 'migrate') {
     getDb();
