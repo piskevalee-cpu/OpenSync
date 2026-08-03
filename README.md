@@ -99,6 +99,16 @@ Key features:
 
 ### Installation
 
+The quickest way is a single cURL one-liner — it checks/installs dependencies, asks where to install (home / current dir / custom), clones the repo, runs `npm install` + `db:init`, registers the global `opensync` command and optionally starts the server:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/piskevalee-cpu/OpenSync/refs/heads/main/install.sh | bash
+```
+
+The installer is interactive when run in a terminal (install location + start choices are prompted) and falls back to non-interactive defaults (`$HOME/OpenSync`, server started) when no terminal is available.
+
+Manual steps — exactly what the installer does:
+
 1. Clone the repo
    ```sh
    git clone https://github.com/piskevalee-cpu/OpenSync.git
@@ -147,7 +157,7 @@ opensync            # live dashboard (fallback: one-shot status)
 
 | Command | Description |
 | --- | --- |
-| *(no command)* | Live dashboard: service state, LAN URLs, admin status, recent log lines. Keybindings `[s]` start, `[S]` stop, `[r]` restart, `[l]` logs, `[q]` quit. Falls back to a one-shot `status` when stdin/stdout aren't TTYs (pipeline-safe). |
+| *(no command)* | Live dashboard: service state, LAN URLs, admin status, recent log lines. Keybindings `[s]` start, `[S]` stop, `[r]` restart, `[l]` logs, `[q]` quit **and stop the server**. Falls back to a one-shot `status` when stdin/stdout aren't TTYs (pipeline-safe). |
 | `start` | Starts the server in the background. Log goes to `storage/opensync.log`, waits ~20s for the server to answer `GET /api/health`. |
 | `stop` | Stops the server (SIGTERM, then SIGKILL after ~5s if needed), removes the pid file. |
 | `restart` | `stop` + `start`. |

@@ -18,13 +18,16 @@ Self-hosted LAN platform for uploading/downloading offline games with differenti
 ```
 npm run dev        # node --watch server/index.js
 npm start          # production run (PORT, HOST, OPENSYNC_STORAGE env)
-npm test           # node --test tests/*.test.js (89 tests)
+npm test           # node --test tests/*.test.js (96 tests)
+                   # single file: node --test tests/<file>.test.js
 npm run lint       # node --check + console.log scan (scripts/lint.js)
 npm run db:init    # creates storage/ dir + SQLite schema (migrations auto-apply on getDb; db:migrate is a no-op alias)
 bash install.sh    # one-shot installer: deps, install location, clone, npm i + db:init, `opensync` symlink, optional start
 opensync           # global CLI (symlink → scripts/cli.sh): dashboard | start | stop | restart | status | logs | update | uninstall
 ```
 Env: `PORT` (default 3000), `HOST` (default 0.0.0.0), `OPENSYNC_STORAGE` (default `./storage`), `OPENSYNC_SECRET`.
+
+Logging convention (enforced by `npm run lint`): **no `console.log`/`console.debug` in any non-CLI file** (server/routes, client, tests, scripts/lint.js checks all); use `console.error` for server-side errors. Exempt: `server/index.js`, `server/db.js`, `scripts/*`.
 
 ## Architecture Constraints (Non-Negotiable)
 - **Games stored as live folders** (`/storage/games/{game_id}/files/`) — never archives. Required for diff.
@@ -36,7 +39,8 @@ Env: `PORT` (default 3000), `HOST` (default 0.0.0.0), `OPENSYNC_STORAGE` (defaul
 - **Server re-hashes every received overlay file** (`x-hash` header) — trust-but-verify; mismatch → 422 + file deleted.
 
 ## Key Implementation Details
-- **Chunked upload**: fixed 4MB (`CHUNK_SIZE`), chunks MUST arrive in order — server rejects out-of-order with 409. Resume via `upload/init` (part size / chunk size). Both game files (`games.js`) and overlay files (`sync.js` via `chunked.js`) share this; keep them consistent. 0-byte files are allowed (`x-size: 0`).
+- **Chunked upload**: fixed 4MB (`CHUNK_SIZE`), chunks MUST arrive in order — server rejects out-of-order with 409. Resume via `upload/init` (part size / chunk size). Both game files (`games.js`) and overlay files (`sync.js` via `chunked.js`) share this; keep them consistent. 0-byte files are allowed (`x-size: 0`). Uploads **auto-complete**: when the last chunk lands and the uploads dir is empty, a 2s timer (`AUTO_COMPLETE_DELAY`) calls `processGame` without an explicit `upload/complete` (only while status is `processing`).
+- **Stale processing cleanup**: `server/index.js` sweeps every 5 min and deletes games stuck in `processing` with `last_activity_at` older than 10 min (abandoned uploads). A long upload that goes quiet (no chunk for 10+ min) can be deleted — keep activity flowing.
 - **`safeRelPath`** (`server/storage.js`) is the single gate for every client-supplied path: rejects absolute, `..`, backslash, NUL. Never bypass it.
 - **Manifest generation is async**: `upload/complete` returns 202, `processGame` hashes in background; client polls `status`.
 - **Path validation on deletions**: only paths present in the clean manifest are accepted as deletions. **Deletions are versioned**: `deletions.json` = `{manifest_hash, paths}` where `manifest_hash` is a sha256 fingerprint of the clean file list at sync time — if the game is re-uploaded (manifest changes), stale deletions are ignored at download time; legacy bare-array `deletions.json` is treated as stale. **Mass-deletion guard**: `sync/complete` returns 400 if deletions cover >50% of the manifest unless `force: true`; the client shows a confirmDialog (count + %) before proceeding.
@@ -55,12 +59,15 @@ Env: `PORT` (default 3000), `HOST` (default 0.0.0.0), `OPENSYNC_STORAGE` (defaul
 ## Installer & CLI (bash)
 - **`install.sh`** (repo root) is the one-shot installer: prints the figlet-style banner art (embedded verbatim — also in `scripts/lib.sh::print_banner`, keep both in sync), spinner-animated dep checks (curl/git/node ≥ 22 via nvm, else apt/dnf/yum/pacman/brew NodeSource), asks install location (home default / current dir / custom), clones `REPO_URL` (default `https://github.com/piskevalee-cpu/OpenSync.git`, override via env), reuses an existing install dir (`git pull --ff-only`), runs `npm install` + `db:init`, symlinks `scripts/cli.sh` → `/usr/local/bin/opensync` (falls back to `~/.local/bin` + PATH hint), and offers to start the server. Prompts read stdin → `/dev/tty` → non-interactive default; `curl … | bash` piping works.
 - **`scripts/lib.sh`** — shared bash helpers (colors, `is_tty`/`interactive`/`can_read_tty`, `say`/`info`/`ok`/`warn`/`err`, `run_spinner` with `◐◓◑◒` frames, `prompt_yes_no`, `print_banner`). `install.sh` embeds its own copy — if you change a helper in `lib.sh`, mirror it in `install.sh`.
-- **`scripts/cli.sh`** (`opensync` command) — self-managed **PID-file service**: `storage/opensync.pid` (line 1 = pid, line 2 = port), log at `storage/opensync.log`. Env overrides: `OPENSYNC_DIR` (repo root), `OPENSYNC_STORAGE`, `PORT`. States: `active|starting|external|stale|down`; "active" requires `kill -0` AND `GET /api/health` on 127.0.0.1:PORT (200 JSON). `start` refuses if an external service answers health on the port, cleans stale pidfiles, waits ~20s for health (spinner on tty) then tails the log + removes the pidfile on timeout. `status`/`dashboard` print LAN URLs (`hostname -I`). Dashboard is a raw-mode TUI (`[s]` start, `[S]` stop, `[r]` restart, `[l]` logs, `[q]` quit) and **falls back to one-shot `status` when stdin/stdout are not TTYs** (never hang in pipelines). `update` = `git pull --ff-only` + `npm install` (+ restart only if it was active). `uninstall` removes the symlink (sudo prompt if needed) + optionally the storage dir.
+- **`scripts/cli.sh`** (`opensync` command) — self-managed **PID-file service**: `storage/opensync.pid` (line 1 = pid, line 2 = port), log at `storage/opensync.log`. Env overrides: `OPENSYNC_DIR` (repo root), `OPENSYNC_STORAGE`, `PORT`. States: `active|starting|external|stale|down`; "active" requires `kill -0` AND `GET /api/health` on 127.0.0.1:PORT (200 JSON). `start` refuses if an external service answers health on the port, cleans stale pidfiles, waits ~20s for health (spinner on tty) then tails the log + removes the pidfile on timeout. `status`/`dashboard` print LAN URLs (`hostname -I`). Dashboard is a **cbreak TUI** (`stty -icanon -echo` — NOT raw, which disables `OPOST`/`ONLCR` and scrambles every line; alternate screen buffer `ESC[?1049h`, cursor hidden; redraws in place via `ESC[H` + per-line `ESC[K` only when the rendered content changed; lines truncated to `COLUMNS`). Keys: `[s]` start, `[S]` stop, `[r]` restart, `[l]` logs, `[q]` quit **and stop the server**. Falls back to one-shot `status` when stdin/stdout are not TTYs (never hang in pipelines). `update` = `git pull --ff-only` + `npm install` (+ restart only if it was active). `uninstall` removes the symlink (sudo prompt if needed) + optionally the storage dir.
 - **`db:init` fix**: `server/db.js` compares `path.resolve(process.argv[1])` against `fileURLToPath(import.meta.url)` (NOT `import.meta.url` directly, which is a URL object) — this is what makes `npm run db:init` (and the installer's DB step) actually run.
+- **Installer/CLI history**: the issues reported in **`INSTALLISSUES.md`** (repo root) are **resolved** (2026-08-03): `can_read_tty` probes `/dev/tty` without consuming input, `choose_clone_dir` prompts under `curl … | bash`, banner prints once, dashboard is cbreak + alternate screen + redraws on change, `[q]` stops the server. Keep `lib.sh` ↔ `install.sh` helper copies in sync; bash UX is covered by `tests/cli.test.js`.
 
 ## Testing Gotchas
 - **`node:sqlite` + dynamic imports are process-cached**: the storage dir + DB are fixed at first import per process. Tests boot ONE shared server per test file (`tests/helpers.js` `startServer()` memoizes). Within a file: unique usernames, use returned `game.id` (never hardcode 1), and the first registered user in a file is the admin.
+- **`NODE_ENV=test`** makes `server/index.js` skip `app.listen` and export `app` instead — `tests/helpers.js` relies on this (it also overrides `OPENSYNC_STORAGE` to a tmp dir BEFORE the first import).
 - Test files run in separate processes, so clean-DB tests (bootstrap admin, last-admin guard) live in their own file `tests/bootstrap.test.js`.
+- `npm test` requires `npm install` first (express/archiver); the suite is 96 tests, ~7s runtime (cli tests boot installers + servers under ptys).
 
 ## Test Priorities (all covered in `tests/`)
 1. Manifest generation accuracy (`manifest.test.js`)
@@ -72,3 +79,4 @@ Env: `PORT` (default 3000), `HOST` (default 0.0.0.0), `OPENSYNC_STORAGE` (defaul
 7. Download modes + zip structure (`download.test.js`): STORE default, deflate opt-in + fallback, content fidelity, concurrency, 404s, empty games, admin bench.
 8. Client folder-upload flow — webkitdirectory selection, chunked resume, reconstruction (`folder-upload.test.js`)
 9. Security hardening (`security.test.js`): admin routes 403/401, auth-gated endpoints, cross-game comment parents (400), foreign notification ids (404), clear-scoping, forged/tampered cookies (401), logout invalidation, SQL-injection-ish usernames, non-numeric ids never 500, non-string comment bodies (400).
+10. Installer/CLI bash UX (`cli.test.js`): `can_read_tty` pty probe, dashboard in-place render under a pty (cbreak, alt screen, truncation), install.sh banner-once + interactive prompts honored under a pty, full non-interactive install (defaults, server auto-start + stop), `[q]` stops the server. Uses `script`/`setsid` for ptys and a local fixture repo (zero-dep package.json with a `postinstall` that fabricates the `repo_ready` markers).

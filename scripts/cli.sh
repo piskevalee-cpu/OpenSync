@@ -85,13 +85,17 @@ service_state() {
 
 cmd_start() {
   repo_ready || not_installed
+  # capture the requested port BEFORE service_state — it overwrites the
+  # global PORT with the pidfile/default port, which would silently ignore
+  # the PORT env override and start on 3000.
+  local port="${PORT:-$DEFAULT_PORT}"
   service_state
   if [ "$STATE" = active ]; then
     ok "opensync is already active (pid $PID) — $(url_for "$PORT")"
     return 0
   fi
-  if [ "$STATE" = external ]; then
-    err "something is already answering on port $PORT (health ok) — refusing to start."
+  if health_ok "$port"; then
+    err "something is already answering on port $port (health ok) — refusing to start."
     err "stop the other process first, or open the port."
     return 1
   fi
@@ -100,7 +104,6 @@ cmd_start() {
     rm -f "$PIDFILE"
   fi
 
-  local port="${PORT}"
   mkdir -p "$STORAGE"
   info "starting opensync on port $port (log: $LOGFILE)"
 
@@ -229,25 +232,33 @@ cmd_uninstall() {
 
 # ---- dashboard (interactive TUI) ---------------------------------------------
 
+# Render the whole dashboard to stdout. Every line is truncated to the
+# terminal width and ends with ESC[K (clear to EOL) so in-place redraws
+# never leave residue on shorter lines.
 render_screen() {
   STATE=down; PID=""; PORT="$DEFAULT_PORT"
-  printf '\033[2J\033[H'
-  print_banner
   if command -v curl >/dev/null 2>&1; then service_state; fi
 
-  printf '\n'
-  say "$C_BOLD" "  OpenSync CLI v$(pkg_version)  ·  node $(node -v 2>/dev/null || echo '?')  ·  npm $(npm -v 2>/dev/null || echo '?')"
-  printf '%s\n' "  ────────────────────────────────────────────────────────────────"
+  local w out=""
+  w=$(tput cols 2>/dev/null || echo 80)
+  [ "$w" -ge 20 ] || w=80
+  put()  { out+="${1:0:$w}$C_RESET"$'\033[K\n'; }
+  cput() { out+="$1${2:0:$w}$C_RESET"$'\033[K\n'; }
+
+  while IFS= read -r l; do put "$l"; done <<<"$(print_banner)"
+  put ""
+  cput "$C_BOLD" "  OpenSync CLI v$(pkg_version)  ·  node $(node -v 2>/dev/null || echo '?')  ·  npm $(npm -v 2>/dev/null || echo '?')"
+  put "  ────────────────────────────────────────────────────────────────"
 
   case "$STATE" in
-    active)   say "$C_GREEN"  "  ● service    ACTIVE    $(url_for)  (pid $PID)" ;;
-    starting) say "$C_YELLOW" "  ◐ service    STARTING  $(url_for)  (pid $PID)" ;;
-    external) say "$C_CYAN"   "  ● service    RUNNING (external)  $(url_for)" ;;
-    stale)    say "$C_RED"    "  ○ service    DOWN      stale pid $PID — press [s] to start" ;;
-    down)     say "$C_RED"    "  ○ service    DOWN      $(url_for) — press [s] to start" ;;
+    active)   cput "$C_GREEN"  "  ● service    ACTIVE    $(url_for "$PORT")  (pid $PID)" ;;
+    starting) cput "$C_YELLOW" "  ◐ service    STARTING  $(url_for "$PORT")  (pid $PID)" ;;
+    external) cput "$C_CYAN"   "  ● service    RUNNING (external)  $(url_for "$PORT")" ;;
+    stale)    cput "$C_RED"    "  ○ service    DOWN      stale pid $PID — press [s] to start" ;;
+    down)     cput "$C_RED"    "  ○ service    DOWN      $(url_for "$PORT") — press [s] to start" ;;
   esac
 
-  {
+  while IFS= read -r line; do put "$line"; done < <({
     echo "  lan access   $(url_for "$PORT")"
     while read -r ip; do
       if [ -n "$ip" ]; then
@@ -257,50 +268,69 @@ render_screen() {
     printf '  port         %s\n' "$PORT"
     printf '  storage      %s\n' "$STORAGE"
     printf '  repo         %s\n' "$ROOT"
-  } | while read -r line; do say "$C_DIM" "$line"; done
+  })
 
   local admin_info=""
   if [ "$STATE" = active ] && command -v curl >/dev/null 2>&1; then
     admin_info=$(curl -fsS -m 2 "http://127.0.0.1:$PORT/api/info" 2>/dev/null || true)
     if [ -n "$admin_info" ]; then
       if printf '%s' "$admin_info" | grep -q '"has_admin":true'; then
-        say "$C_DIM" "  first admin   registered"
+        cput "$C_DIM" "  first admin   registered"
       else
-        say "$C_YELLOW" "  first admin   NOT registered — open the page and register (first user = admin)"
+        cput "$C_YELLOW" "  first admin   NOT registered — open the page and register (first user = admin)"
       fi
     fi
   fi
 
   if [ -f "$LOGFILE" ]; then
-    printf '\n'
-    tail -n 4 "$LOGFILE" 2>/dev/null | sed 's/^/  │ /' | while read -r line; do say "$C_DIM" "$line"; done
+    put ""
+    while IFS= read -r line; do put "$line"; done < <(tail -n 4 "$LOGFILE" 2>/dev/null | sed 's/^/  │ /')
   fi
 
-  printf '\n'
-  say "$C_BOLD" '  [s] start    [S] stop    [r] restart    [l] logs    [q] quit'
+  put ""
+  cput "$C_BOLD" '  [s] start    [S] stop    [r] restart    [l] logs    [q] quit + stop'
+  printf '%b' "$out"
 }
 
-restore_tty() { stty sane 2>/dev/null || true; }
+restore_tty() {
+  stty sane 2>/dev/null || true
+  printf '\033[?25h\033[?1049l' 2>/dev/null || true
+}
 
 cmd_dashboard() {
   if ! interactive; then
     cmd_status
     return
   fi
-  local key
-  trap restore_tty EXIT INT TERM
-  stty raw -echo 2>/dev/null || true
+  local key prev=""
+  trap restore_tty EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  printf '\033[?1049h\033[?25l'
+  # cbreak (not raw): keeps OPOST/ONLCR so \n still returns the cursor to
+  # column 0 — raw mode made every dashboard line start where the previous
+  # one ended (cumulative right-shift of the whole screen).
+  stty -icanon -echo 2>/dev/null || true
   while :; do
-    render_screen
+    local screen
+    screen=$(render_screen)
+    if [ "$screen" != "$prev" ]; then
+      printf '\033[H%b' "$screen"
+      prev="$screen"
+    fi
     if read -r -t 3 -n 1 key; then
       case "$key" in
-        [qQ]) printf '\n'; break ;;
+        [qQ])
+          cmd_stop >/dev/null 2>&1 || true
+          break
+          ;;
         [sS]|r)
           case "$key" in
             s) cmd_start >/dev/null 2>&1 || true ;;
             S) cmd_stop  >/dev/null 2>&1 || true ;;
             r) cmd_restart >/dev/null 2>&1 || true ;;
           esac
+          prev=""
           ;;
         [lL])
           stty sane
@@ -308,7 +338,8 @@ cmd_dashboard() {
           cmd_logs || true
           printf '\npress enter to return to the dashboard\n'
           read -r _ || true
-          stty raw -echo
+          stty -icanon -echo
+          prev=""
           ;;
       esac
     fi

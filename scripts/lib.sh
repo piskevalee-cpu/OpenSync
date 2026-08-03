@@ -23,9 +23,17 @@ interactive() { [ -t 0 ] && [ -t 1 ]; }
 
 # can_read_tty — a controlling terminal is available for prompts
 # (true even when stdin is a pipe, e.g. `curl … | bash` in a terminal).
+# Probe by opening /dev/tty and checking it's a terminal — never block
+# or consume input (a `read -t` probe would time out → false, killing
+# every interactive prompt under `curl … | bash`).
 can_read_tty() {
   [ -e /dev/tty ] || return 1
-  { read -r -t 1 _ </dev/tty; } 2>/dev/null
+  local ok=1
+  if { exec 3</dev/tty; } 2>/dev/null && [ -t 3 ]; then
+    ok=0
+  fi
+  exec 3<&- 2>/dev/null || true
+  return "$ok"
 }
 
 say() { printf '%b%s%b\n' "$1" "$2" "$C_RESET"; }
