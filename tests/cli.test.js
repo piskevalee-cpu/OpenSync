@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,6 +115,29 @@ function fixtureReady(dir) {
   writeFileSync(path.join(dir, 'storage', 'opensync.db'), '');
 }
 
+/**
+ * Where install.sh's install_command placed the command symlink.
+ * It prefers /usr/local/bin when writable (e.g. GH-hosted runners), and
+ * falls back to $HOME/.local/bin otherwise — accept either, user-first to
+ * avoid stale system links from previous runs.
+ */
+function installedCommandPath(home) {
+  const user = path.join(home, '.local', 'bin', 'opensync');
+  for (const p of [user, '/usr/local/bin/opensync']) {
+    try {
+      if (lstatSync(p).isSymbolicLink()) return p;
+    } catch { /* not a symlink yet */ }
+  }
+  return null;
+}
+
+/** Assert the opensync command link exists and points at the install dir's cli.sh. */
+function assertCommandInstalled(home) {
+  const link = installedCommandPath(home);
+  assert.ok(link, 'opensync symlink must be created (system bin or ~/.local/bin)');
+  assert.ok(readlinkSync(link).endsWith('scripts/cli.sh'), 'symlink must target the installed cli.sh');
+}
+
 test('install.sh: non-interactive run — defaults, banner once, server starts and stops', { skip: !(HAVE_SETSID && HAVE_GIT) }, async () => {
   const home = mkdtempSync(path.join(tmpdir(), 'os-install-'));
   const fixture = makeFixture();
@@ -124,7 +147,7 @@ test('install.sh: non-interactive run — defaults, banner once, server starts a
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(bannerCount(r.stdout), 1, 'banner must print exactly once');
     assert.doesNotMatch(r.stdout, /where should OpenSync be installed\?/);
-    assert.ok(lstatSync(path.join(home, '.local', 'bin', 'opensync')).isSymbolicLink(), 'opensync symlink');
+    assertCommandInstalled(home);
     assert.ok(existsSync(path.join(home, 'OpenSync', 'storage', 'opensync.db')), 'db created');
     assert.ok(await healthOk(port), 'server should be ACTIVE after default install');
     const stop = bash(`env HOME=${home} PORT=${port} bash ${home}/OpenSync/scripts/cli.sh stop`);
@@ -148,7 +171,7 @@ test('install.sh: junk answer re-prompts and is not treated as yes', { skip: !(H
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /please answer y or n/, 'invalid input must re-prompt');
     assert.match(r.stdout, /no problem — OpenSync is installed/);
-    assert.ok(lstatSync(path.join(home, '.local', 'bin', 'opensync')).isSymbolicLink(), 'opensync symlink');
+    assertCommandInstalled(home);
     assert.ok(!(await healthOk(port)), 'server must NOT start when a junk answer is followed by n');
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -225,7 +248,7 @@ test('install.sh: interactive prompts appear and are honored under a pty', { ski
     assert.match(r.stdout, /where should OpenSync be installed\?/);
     assert.match(r.stdout, /start OpenSync now\?/);
     assert.match(r.stdout, /no problem — OpenSync is installed/);
-    assert.ok(lstatSync(path.join(home, '.local', 'bin', 'opensync')).isSymbolicLink(), 'opensync symlink');
+    assertCommandInstalled(home);
     assert.equal(bannerCount(r.stdout), 1, 'banner must print exactly once');
     assert.ok(!(await healthOk(port)), 'server must NOT start when answered n');
   } finally {
