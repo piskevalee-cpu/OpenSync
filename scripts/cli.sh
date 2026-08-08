@@ -342,13 +342,15 @@ cmd_dashboard() {
           # A no-op INT trap: Ctrl+C still kills `tail`, but the shell itself
           # would otherwise self-signal and exit (a cleared trap is not
           # enough — non-interactive bash re-raises SIGINT after the child
-          # dies). Restore the real trap when back.
+          # dies). Hold the no-op trap through the Enter read — the re-raise
+          # is asynchronous, so restoring 'exit 130' early exits 130 when the
+          # dashboard is supposed to continue.
           trap ':' INT
           cmd_logs || true
-          trap 'exit 130' INT
           printf '\npress enter to return to the dashboard\n'
           read -r _ || true
           stty -icanon -echo
+          trap 'exit 130' INT
           prev=""
           ;;
       esac
