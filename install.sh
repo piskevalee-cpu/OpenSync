@@ -16,7 +16,6 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/piskevalee-cpu/OpenSync.git}"
 REPO_DIR="${REPO_DIR:-OpenSync}"
 MIN_NODE_MAJOR=22
-MIN_NODE_MINOR=13
 SYSTEM_BIN="/usr/local/bin"
 USER_BIN="$HOME/.local/bin"
 
@@ -255,7 +254,7 @@ install_node() {
       run_spinner "installing node@22 via brew" -- brew install node@22
       ;;
     *)
-      err "no supported package manager found — install Node.js ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}+ manually: https://nodejs.org/"
+      err "no supported package manager found — install Node.js 22+ manually: https://nodejs.org/"
       exit 1
       ;;
   esac
@@ -277,23 +276,22 @@ check_deps() {
   local node_ok=false node_ver=""
   if command -v node >/dev/null 2>&1; then
     node_ver=$(node -v | sed 's/^v//')
-    local major minor
+    local major
     major=$(printf '%s' "$node_ver" | cut -d. -f1)
-    minor=$(printf '%s' "$node_ver" | cut -d. -f2)
-    if [ "$major" -gt "$MIN_NODE_MAJOR" ] || { [ "$major" -eq "$MIN_NODE_MAJOR" ] && [ "$minor" -ge "$MIN_NODE_MINOR" ]; }; then
+    if [ "$major" -ge "$MIN_NODE_MAJOR" ]; then
       node_ok=true
       ok "node found: v$node_ver"
     else
-      warn "node found but v$node_ver — at least v${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} is required"
+      warn "node found but v$node_ver — at least v${MIN_NODE_MAJOR} is required"
     fi
   else
     warn "node is missing"
   fi
   if [ "$node_ok" != true ]; then
-    if prompt_yes_no "install/update Node.js ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}+ now?" yes; then
+    if prompt_yes_no "install/update Node.js ${MIN_NODE_MAJOR}+ now?" yes; then
       install_dep node || exit 1
     else
-      err "Node.js ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}+ is required. exiting."
+      err "Node.js ${MIN_NODE_MAJOR}+ is required. exiting."
       exit 1
     fi
   fi

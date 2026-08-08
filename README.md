@@ -94,7 +94,7 @@ Key features:
 
 ### Prerequisites
 
-* **Node.js 22.13+**
+* **Node.js 22+**
 * npm
 
 ### Installation
@@ -137,39 +137,6 @@ Manual steps — exactly what the installer does:
 | `HOST` | `0.0.0.0` | Bind address |
 | `OPENSYNC_STORAGE` | `./storage` | Data dir (games, overlays, SQLite DB, HMAC secret) |
 | `OPENSYNC_SECRET` | auto-generated | Cookie-signing secret (stored in `storage/server-secret`) |
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-### Docker (Linux/amd64)
-
-> **amd64 (x86_64) images only** — no arm64 images are published. On ARM/Raspberry Pi/NAS hardware use the `install.sh`/`opensync` CLI route instead.
-
-```sh
-docker pull ghcr.io/piskevalee-cpu/opensync
-```
-
-Run:
-
-```sh
-docker run -d --name opensync --restart unless-stopped -p 3000:3000 -v opensync-data:/data ghcr.io/piskevalee-cpu/opensync:latest
-```
-
-Or with Compose — fetch the compose file from the repo, then start:
-
-```sh
-curl -O https://raw.githubusercontent.com/piskevalee-cpu/OpenSync/refs/heads/main/docker-compose.yml
-docker compose up -d
-```
-
-Data (accounts, games, save overlays, the SQLite DB) persists in the `opensync-data` volume.
-
-**Upgrading**: pull the new image and recreate the container — the volume keeps all data:
-
-```sh
-docker pull ghcr.io/piskevalee-cpu/opensync
-docker stop opensync && docker rm opensync
-docker run -d --name opensync --restart unless-stopped -p 3000:3000 -v opensync-data:/data ghcr.io/piskevalee-cpu/opensync:latest
-```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
