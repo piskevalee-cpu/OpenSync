@@ -88,7 +88,7 @@ export async function renderGame(el) {
 
   el.replaceChildren(
     h('a', { class: 'btn btn-sm btn-ghost', href: '#/', text: '← library' }),
-    h('div', { class: 'game-header', style: 'margin-top:14px;' }, [
+    h('div', { class: 'game-header', style: 'margin-top:18px;' }, [
       game.cover
         ? h('div', { class: 'game-cover-lg' }, [h('img', { src: game.cover, alt: game.name })])
         : h('div', { class: 'game-cover-lg' }, [h('span', { text: '▢' })]),
