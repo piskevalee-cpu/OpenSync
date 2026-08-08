@@ -35,6 +35,7 @@ export async function renderAuth(el) {
     const body = form.querySelector('#auth-body');
     const err = form.querySelector('#auth-error');
     err.textContent = '';
+    const prevH = body.offsetHeight;
     const username = h('div', { class: 'field' }, [
       h('label', { text: 'username' }),
       h('input', { type: 'text', name: 'username', autocomplete: 'username' }),
@@ -47,17 +48,12 @@ export async function renderAuth(el) {
       h('label', { text: 'profile picture (optional, jpg/png)' }),
       h('div', { class: 'pfp-picker' }, [
         h('img', { class: 'pfp-lg pfp-preview', src: '/img/blankpfp.jpg', alt: '' }),
-        h('div', { class: 'pfp-picker-btns' }, [
-          h('input', { type: 'file', name: 'pfp', accept: 'image/jpeg,image/png', style: 'display:none' }),
-          h('button', { class: 'btn btn-ghost btn-sm', text: 'choose image' }),
-          h('p', { class: 'muted small', text: 'or drop an image here' }),
-        ]),
+        h('p', { class: 'muted small', text: 'drag & drop an image here' }),
       ]),
     ]);
     let pfpFile = null;
-    const pfpInput = pfp.querySelector('input');
+    const pfpPicker = pfp.querySelector('.pfp-picker');
     const pfpImg = pfp.querySelector('img');
-    pfp.querySelector('button').addEventListener('click', () => pfpInput.click());
     function setPfpFile(file) {
       pfpFile = file || null;
       if (file) {
@@ -68,22 +64,16 @@ export async function renderAuth(el) {
         pfpImg.src = '/img/blankpfp.jpg';
       }
     }
-    pfpInput.addEventListener('change', () => setPfpFile(pfpInput.files[0] || null));
-    pfp.addEventListener('dragover', (e) => {
+    pfpPicker.addEventListener('dragover', (e) => {
       e.preventDefault();
-      pfp.classList.add('drag-over');
+      pfpPicker.classList.add('drag-over');
     });
-    pfp.addEventListener('dragleave', () => pfp.classList.remove('drag-over'));
-    pfp.addEventListener('drop', (e) => {
+    pfpPicker.addEventListener('dragleave', () => pfpPicker.classList.remove('drag-over'));
+    pfpPicker.addEventListener('drop', (e) => {
       e.preventDefault();
-      pfp.classList.remove('drag-over');
+      pfpPicker.classList.remove('drag-over');
       const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'));
-      if (file) {
-        const dt = new DataTransfer();
-        dt.items.add(file);
-        pfpInput.files = dt.files;
-        setPfpFile(file);
-      }
+      if (file) setPfpFile(file);
     });
     const submit = h('button', { class: 'btn btn-primary', text: mode === 'login' ? 'enter' : 'create account' });
     const hints = [];
@@ -94,6 +84,13 @@ export async function renderAuth(el) {
       hints.push(h('p', { class: 'faint small' }, 'no account yet? switch to register.'));
     }
     body.replaceChildren(username, password, ...(mode === 'register' ? [pfp] : []), submit, ...hints);
+    const targetH = body.scrollHeight;
+    if (prevH > 0 && targetH !== prevH) {
+      body.style.height = `${prevH}px`;
+      void body.offsetHeight;
+      body.style.height = `${targetH}px`;
+      body.addEventListener('transitionend', () => { body.style.height = ''; }, { once: true });
+    }
     if (mode === 'login') password.querySelector('input').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit.click(); });
 
     submit.onclick = async () => {

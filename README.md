@@ -178,7 +178,7 @@ docker run -d --name opensync --restart unless-stopped -p 3000:3000 -v opensync-
 
 * **Upload a game**: pick a folder — or just **drag & drop** it onto the page — watch per-file progress with ETA, and resume after interruptions. The server hashes everything into a clean manifest.
 * **Sync your save**: run a sync from the game page pointing at your local game folder. Hashes are computed in your browser, only the diff is uploaded, and your overlay is stored per user on the server.
-* **Profile picture**: optional at registration — drop an image onto the picker (or browse); the default blank avatar shows until then. On your profile, dropping a picture saves it instantly.
+* **Profile picture**: optional at registration — drop an image onto the picker; the default blank avatar shows until then. On your profile, dropping a picture saves it instantly.
 * **Download**: two choices per game — *fresh install* (clean files only) or *synced game* (your overlay merged in). Zips stream directly from disk; deflate compression is opt-in via `?deflate=1..9`.
 
 ### The `opensync` CLI
