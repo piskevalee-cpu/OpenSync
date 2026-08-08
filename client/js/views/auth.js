@@ -44,9 +44,45 @@ export async function renderAuth(el) {
       h('input', { type: 'password', name: 'password', autocomplete: mode === 'login' ? 'current-password' : 'new-password' }),
     ]);
     const pfp = h('div', { class: 'field' }, [
-      h('label', { text: 'profile picture (required, jpg/png)' }),
-      h('input', { type: 'file', name: 'pfp', accept: 'image/jpeg,image/png' }),
+      h('label', { text: 'profile picture (optional, jpg/png)' }),
+      h('div', { class: 'pfp-picker' }, [
+        h('img', { class: 'pfp-lg pfp-preview', src: '/img/blankpfp.jpg', alt: '' }),
+        h('div', { class: 'pfp-picker-btns' }, [
+          h('input', { type: 'file', name: 'pfp', accept: 'image/jpeg,image/png' }),
+          h('p', { class: 'muted small', text: 'or drop an image here' }),
+        ]),
+      ]),
     ]);
+    let pfpFile = null;
+    const pfpInput = pfp.querySelector('input');
+    const pfpImg = pfp.querySelector('img');
+    function setPfpFile(file) {
+      pfpFile = file || null;
+      if (file) {
+        const url = URL.createObjectURL(file);
+        pfpImg.src = url;
+        pfpImg.onload = () => URL.revokeObjectURL(url);
+      } else {
+        pfpImg.src = '/img/blankpfp.jpg';
+      }
+    }
+    pfpInput.addEventListener('change', () => setPfpFile(pfpInput.files[0] || null));
+    pfp.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      pfp.classList.add('drag-over');
+    });
+    pfp.addEventListener('dragleave', () => pfp.classList.remove('drag-over'));
+    pfp.addEventListener('drop', (e) => {
+      e.preventDefault();
+      pfp.classList.remove('drag-over');
+      const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'));
+      if (file) {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        pfpInput.files = dt.files;
+        setPfpFile(file);
+      }
+    });
     const submit = h('button', { class: 'btn btn-primary', text: mode === 'login' ? 'enter' : 'create account' });
     const hints = [];
     if (mode === 'register' && !(await getInfo()).has_admin) {
@@ -67,16 +103,17 @@ export async function renderAuth(el) {
         const p = password.querySelector('input').value;
         let pfpDataUrl = null;
         if (mode === 'register') {
-          const file = pfp.querySelector('input').files[0];
-          if (!file) throw new Error('a profile picture is required');
-          if (!/^image\/(jpeg|png)$/.test(file.type)) throw new Error('profile picture must be jpeg or png');
-          if (file.size > 8 * 1024 * 1024) throw new Error('profile picture too large (max 8 MB)');
-          pfpDataUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error('could not read profile picture'));
-            reader.readAsDataURL(file);
-          });
+          const file = pfpFile;
+          if (file) {
+            if (!/^image\/(jpeg|png)$/.test(file.type)) throw new Error('profile picture must be jpeg or png');
+            if (file.size > 8 * 1024 * 1024) throw new Error('profile picture too large (max 8 MB)');
+            pfpDataUrl = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = () => reject(new Error('could not read profile picture'));
+              reader.readAsDataURL(file);
+            });
+          }
         }
         const { user } = mode === 'login'
           ? await api.auth.login(u, p)

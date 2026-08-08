@@ -75,6 +75,38 @@ test('registration validation: short password, duplicate username', async () => 
   assert.equal(dup.status, 409);
 });
 
+test('registration: pfp is optional and the blank avatar is the default', async () => {
+  const res = await fetch(`${srv.base}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'no_pfp_user', password: 'secret123' }),
+  });
+  assert.equal(res.status, 201);
+  const { user } = await res.json();
+  assert.equal(user.pfp, '/img/blankpfp.jpg');
+  assert.equal(existsSync(path.join(srv.dir, 'users', String(user.id))), false, 'no user storage dir is created without a pfp');
+
+  const img = await fetch(`${srv.base}/img/blankpfp.jpg`);
+  assert.equal(img.status, 200, 'default avatar asset must be served');
+  assert.match(img.headers.get('content-type'), /image\/jpeg/);
+
+  const me = await login(srv.base, 'no_pfp_user');
+  assert.equal(me.user.pfp, '/img/blankpfp.jpg');
+
+  const list = await fetch(`${srv.base}/api/users`, { headers: headers(me.cookie) });
+  const listed = (await list.json()).users.find((u) => u.username === 'no_pfp_user');
+  assert.equal(listed.pfp, '/img/blankpfp.jpg');
+});
+
+test('registration: explicitly provided but invalid pfp is still rejected', async () => {
+  const res = await fetch(`${srv.base}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'bad_pfp_user', password: 'secret123', pfp: 'data:image/png;base64,%%%not-valid%%%' }),
+  });
+  assert.equal(res.status, 400);
+});
+
 test('protected routes require auth', async () => {
   const res = await fetch(`${srv.base}/api/games`);
   assert.equal(res.status, 401);

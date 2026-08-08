@@ -1199,6 +1199,35 @@ table.tbl {
   flex-shrink: 0;
 }
 
+.pfp-picker {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.pfp-picker .pfp-preview {
+  width: 64px;
+  height: 64px;
+  font-size: 28px;
+}
+
+.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -6px;
+  border-radius: 8px;
+  background: var(--accent-dim);
+}
+
+.drop-hint {
+  margin: 10px 0;
+  padding: 18px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  text-align: center;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .profile-stats {
   display: flex;
   gap: 24px;

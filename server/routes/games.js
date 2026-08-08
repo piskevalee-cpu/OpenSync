@@ -37,7 +37,8 @@ function toPublicGame(row) {
 
 const GAME_SELECT = `
   SELECT g.*, u.username AS uploader_name,
-    '/api/auth/users/' || u.id || '/pfp' AS uploader_pfp,
+    CASE WHEN u.pfp IS NOT NULL THEN '/api/auth/users/' || u.id || '/pfp'
+         WHEN u.id IS NOT NULL THEN '/img/blankpfp.jpg' END AS uploader_pfp,
     (SELECT COUNT(*) FROM downloads d WHERE d.game_id = g.id) AS download_count
   FROM games g LEFT JOIN users u ON u.id = g.uploaded_by
 `;
@@ -64,7 +65,8 @@ gamesRouter.get('/:id', async (req, res, next) => {
       .prepare(
         `SELECT c.id, c.text, c.created_at, c.user_id, c.parent_id,
           COALESCE(u.username, 'deleted') AS author,
-          CASE WHEN c.user_id IS NOT NULL AND u.pfp IS NOT NULL THEN '/api/auth/users/' || u.id || '/pfp' END AS author_pfp
+          CASE WHEN c.user_id IS NOT NULL AND u.pfp IS NOT NULL THEN '/api/auth/users/' || u.id || '/pfp'
+               WHEN c.user_id IS NOT NULL THEN '/img/blankpfp.jpg' END AS author_pfp
          FROM comments c LEFT JOIN users u ON u.id = c.user_id
          WHERE c.game_id = ? ORDER BY c.created_at ASC`,
       )

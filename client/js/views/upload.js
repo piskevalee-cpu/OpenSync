@@ -134,8 +134,9 @@ function buildUploadView() {
 
   const root = h('div', {}, [
     h('h1', { class: 'page-title' }, 'upload a game'),
-    h('div', { class: 'panel' }, [
+    h('div', { class: 'panel drop-target' }, [
       h('div', { class: 'form-grid' }, [name, desc, reqs.wrap, cover]),
+      h('div', { class: 'drop-hint', hidden: true }, 'drop your game folder here'),
       h('div', { class: 'flex' }, [
         folderBtn,
         folderState,
@@ -148,17 +149,46 @@ function buildUploadView() {
     preview,
   ]);
 
-  folderBtn.onclick = () => picker.click();
+  const dropTarget = root.querySelector('.drop-target');
+  const dropHint = root.querySelector('.drop-hint');
+  let dragDepth = 0;
+  dropTarget.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragDepth += 1;
+    dropTarget.classList.add('drag-over');
+    dropHint.hidden = dragDepth <= 0;
+  });
+  dropTarget.addEventListener('dragover', (e) => e.preventDefault());
+  dropTarget.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth <= 0) {
+      dropTarget.classList.remove('drag-over');
+      dropHint.hidden = true;
+    }
+  });
+  dropTarget.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    dropTarget.classList.remove('drag-over');
+    dropHint.hidden = true;
+    const files = await droppedFiles(e.dataTransfer);
+    if (files.length) setFiles(files);
+  });
 
-  picker.onchange = () => {
-    files = [...picker.files].filter((f) => f.webkitRelativePath);
+  function setFiles(list) {
+    files = list.filter((f) => f.webkitRelativePath);
     files.sort((a, b) => a.webkitRelativePath.localeCompare(b.webkitRelativePath));
     folderState.textContent = files.length
       ? `${files.length} files · ${humanSize(files.reduce((s, f) => s + f.size, 0))}`
       : '';
     startBtn.disabled = !files.length;
     preview.replaceChildren(...files.slice(0, 20).map((f) => h('div', { class: 'upload-row-name small faint', text: f.webkitRelativePath })));
-  };
+  }
+
+  folderBtn.onclick = () => picker.click();
+
+  picker.onchange = () => setFiles([...picker.files]);
 
   startBtn.onclick = async () => {
     err.textContent = '';
@@ -313,4 +343,43 @@ function buildUploadView() {
   }
 
   return root;
+}
+
+/** Walk a DataTransfer (dropped folders/files) into Files with webkitRelativePath set. */
+async function droppedFiles(dataTransfer) {
+  const files = [];
+  if (!dataTransfer) return files;
+  const entries = [...dataTransfer.items]
+    .map((item) => item.webkitGetAsEntry?.() || null)
+    .filter(Boolean);
+  if (entries.length) {
+    async function walkEntry(entry, prefix) {
+      if (entry.isFile) {
+        const file = await new Promise((resolve) => entry.file(resolve, () => resolve(null)));
+        if (!file) return;
+        const rel = prefix ? `${prefix}/${file.name}` : file.name;
+        try {
+          Object.defineProperty(file, 'webkitRelativePath', { value: rel, configurable: true });
+        } catch { /* keep the native value */ }
+        files.push(file);
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        let batch;
+        do {
+          batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+          const sub = prefix ? `${prefix}/${entry.name}` : entry.name;
+          for (const child of batch) await walkEntry(child, sub);
+        } while (batch.length > 0);
+      }
+    }
+    for (const entry of entries) await walkEntry(entry, '');
+  } else {
+    for (const f of dataTransfer.files || []) {
+      try {
+        Object.defineProperty(f, 'webkitRelativePath', { value: f.name, configurable: true });
+      } catch { /* keep the native value */ }
+      files.push(f);
+    }
+  }
+  return files;
 }

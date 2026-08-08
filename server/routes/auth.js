@@ -3,7 +3,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { getDb, now } from '../db.js';
-import { ROLES, USERS_ROOT } from '../config.js';
+import { DEFAULT_PFP_URL, ROLES, USERS_ROOT } from '../config.js';
 import { clearSessionCookie, createSessionCookie, hashPassword, requireAuth, revokeSessions, verifyPassword } from '../security.js';
 import { userPfpPath } from '../storage.js';
 import { cleanUsername, normalizeUsername } from '../usernames.js';
@@ -11,6 +11,10 @@ import { cleanUsername, normalizeUsername } from '../usernames.js';
 export const authRouter = Router();
 
 const MAX_PFP = 8 * 1024 * 1024;
+
+function pfpOf(user) {
+  return user.pfp || DEFAULT_PFP_URL;
+}
 
 function parsePfpDataUrl(dataUrl) {
   const m = /^data:(image\/(?:jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ''));
@@ -59,9 +63,9 @@ authRouter.post('/register', async (req, res) => {
   const norm = normalizeUsername(cleaned);
   const existing = database.prepare('SELECT 1 FROM users WHERE username_norm = ?').get(norm);
   if (existing) return res.status(409).json({ error: 'username already taken' });
-  const parsed = parsePfpDataUrl(pfp);
-  if (!parsed) {
-    return res.status(400).json({ error: 'profile picture is required (jpeg or png, max 8 MB)' });
+  const parsed = typeof pfp === 'string' && pfp !== '' ? parsePfpDataUrl(pfp) : null;
+  if (typeof pfp === 'string' && pfp !== '' && !parsed) {
+    return res.status(400).json({ error: 'invalid profile picture (jpeg or png, max 8 MB)' });
   }
 
   const count = database.prepare('SELECT COUNT(*) AS n FROM users').get().n;
@@ -75,18 +79,20 @@ authRouter.post('/register', async (req, res) => {
     if (/UNIQUE/i.test(err.message)) return res.status(409).json({ error: 'username already taken' });
     throw err;
   }
-  try {
-    const file = userPfpPath(info.lastInsertRowid).replace(/\.(jpg|png)$/, parsed.isPng ? '.png' : '.jpg');
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, parsed.buf);
-    database.prepare('UPDATE users SET pfp = ? WHERE id = ?').run('/api/auth/me/pfp', info.lastInsertRowid);
-  } catch (err) {
-    database.prepare('DELETE FROM users WHERE id = ?').run(info.lastInsertRowid);
-    throw err;
+  if (parsed) {
+    try {
+      const file = userPfpPath(info.lastInsertRowid).replace(/\.(jpg|png)$/, parsed.isPng ? '.png' : '.jpg');
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, parsed.buf);
+      database.prepare('UPDATE users SET pfp = ? WHERE id = ?').run('/api/auth/me/pfp', info.lastInsertRowid);
+    } catch (err) {
+      database.prepare('DELETE FROM users WHERE id = ?').run(info.lastInsertRowid);
+      throw err;
+    }
   }
   const user = database.prepare('SELECT id, username, role, created_at, pfp, session_version FROM users WHERE id = ?').get(info.lastInsertRowid);
   res.setHeader('Set-Cookie', createSessionCookie(user));
-  res.status(201).json({ user });
+  res.status(201).json({ user: { ...user, pfp: pfpOf(user) } });
 });
 
 authRouter.post('/login', (req, res) => {
@@ -99,7 +105,7 @@ authRouter.post('/login', (req, res) => {
   if (!user || !verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'invalid username or password' });
   }
-  const safe = { id: user.id, username: user.username, role: user.role, created_at: user.created_at, pfp: user.pfp, session_version: user.session_version };
+  const safe = { id: user.id, username: user.username, role: user.role, created_at: user.created_at, pfp: pfpOf(user), session_version: user.session_version };
   res.setHeader('Set-Cookie', createSessionCookie(user));
   res.json({ user: safe });
 });
@@ -119,7 +125,7 @@ authRouter.get('/me', (req, res) => {
     downloaded: database.prepare('SELECT COUNT(*) AS n FROM downloads WHERE user_id = ?').get(req.user.id).n,
     synced: database.prepare('SELECT COUNT(DISTINCT game_id) AS n FROM syncs WHERE user_id = ?').get(req.user.id).n,
   };
-  res.json({ user: { id: row.id, username: row.username, role: row.role, created_at: row.created_at, pfp: row.pfp, stats } });
+  res.json({ user: { id: row.id, username: row.username, role: row.role, created_at: row.created_at, pfp: pfpOf(row), stats } });
 });
 
 authRouter.post('/me/pfp', requireAuth, async (req, res, next) => {

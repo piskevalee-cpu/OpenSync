@@ -44,15 +44,16 @@ export async function renderProfile(el, state) {
   const pfpInput = h('input', { type: 'file', accept: 'image/jpeg,image/png' });
   const saveBtn = h('button', { class: 'btn btn-primary', text: 'save pfp' });
   const pfpErr = h('div', { class: 'form-error' });
-  const pfpPanel = h('div', { class: 'panel' }, [
+  const dropHint = h('p', { class: 'muted small', text: '…or just drop a new picture here' });
+  const pfpPanel = h('div', { class: 'panel', id: 'pfp-panel' }, [
     h('h3', { text: 'change profile picture' }),
     h('div', { class: 'flex' }, [pfpInput, saveBtn]),
+    dropHint,
     pfpErr,
   ]);
 
-  saveBtn.onclick = async () => {
-    const file = pfpInput.files[0];
-    if (!file) return;
+  let busy = false;
+  async function uploadPfpFile(file) {
     pfpErr.textContent = '';
     saveBtn.disabled = true;
     saveBtn.textContent = '…';
@@ -61,12 +62,37 @@ export async function renderProfile(el, state) {
       toast('profile picture saved');
       await refresh();
       navigate('#/profile');
-    } catch (e) {
-      pfpErr.textContent = e.message;
+    } catch (err) {
+      pfpErr.textContent = err.message;
       saveBtn.disabled = false;
       saveBtn.textContent = 'save pfp';
+    } finally {
+      busy = false;
     }
+  }
+
+  saveBtn.onclick = () => {
+    const file = pfpInput.files[0];
+    if (file) uploadPfpFile(file);
   };
+
+  pfpPanel.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    pfpPanel.classList.add('drag-over');
+  });
+  pfpPanel.addEventListener('dragleave', () => pfpPanel.classList.remove('drag-over'));
+  pfpPanel.addEventListener('drop', (e) => {
+    e.preventDefault();
+    pfpPanel.classList.remove('drag-over');
+    const file = [...(e.dataTransfer?.files || [])].find((f) => /^image\/(jpeg|png)$/.test(f.type));
+    if (file && !busy) {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      pfpInput.files = dt.files;
+      busy = true;
+      uploadPfpFile(file);
+    }
+  });
 
   const dangerErr = h('div', { class: 'form-error' });
   const dangerBtn = h('button', { class: 'btn btn-danger', text: 'delete account' });

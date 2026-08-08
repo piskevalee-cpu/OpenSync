@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { GAMES_ROOT, USERS_ROOT } from '../config.js';
+import { DEFAULT_PFP_URL, GAMES_ROOT, USERS_ROOT } from '../config.js';
 import { getDb, now } from '../db.js';
 import { requireAdmin } from '../security.js';
 import { hashPassword } from '../security.js';
@@ -70,7 +70,8 @@ adminRouter.get('/stats', async (req, res, next) => {
          FROM downloads d JOIN games g ON g.id = d.game_id JOIN users u ON u.id = d.user_id
          ORDER BY d.created_at DESC LIMIT 20`,
       )
-      .all();
+      .all()
+      .map((r) => ({ ...r, user_pfp: r.user_pfp || DEFAULT_PFP_URL }));
     res.json({ stats: { users, games, downloads, comments, storage_bytes: storageBytes, recent_downloads: recent } });
   } catch (err) {
     next(err);
@@ -85,7 +86,8 @@ adminRouter.get('/users', (req, res) => {
          (SELECT COUNT(*) FROM downloads d WHERE d.user_id = u.id) AS downloads_count
        FROM users u ORDER BY u.created_at ASC`,
     )
-    .all();
+    .all()
+    .map((u) => ({ ...u, pfp: u.pfp || DEFAULT_PFP_URL }));
   res.json({ users });
 });
 

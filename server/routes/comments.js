@@ -38,7 +38,8 @@ function notifyMentions(database, text, gameId, authorName, excludeIds) {
 const COMMENT_SELECT = `
   SELECT c.id, c.text, c.created_at, c.user_id, c.parent_id,
     COALESCE(u.username, 'deleted') AS author,
-    CASE WHEN c.user_id IS NOT NULL AND u.pfp IS NOT NULL THEN '/api/auth/users/' || u.id || '/pfp' END AS author_pfp
+    CASE WHEN c.user_id IS NOT NULL AND u.pfp IS NOT NULL THEN '/api/auth/users/' || u.id || '/pfp'
+         WHEN c.user_id IS NOT NULL THEN '/img/blankpfp.jpg' END AS author_pfp
   FROM comments c LEFT JOIN users u ON u.id = c.user_id
 `;
 

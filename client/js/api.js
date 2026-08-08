@@ -108,7 +108,8 @@ export function fmtDateTime(iso) {
 
 export function pfpUrl(pfp) {
   if (!pfp) return '';
-  // backend returns /api/auth/users/{id}/pfp; handle any path starting with /api/
-  if (pfp.startsWith('/api/')) return pfp;
+  // backend returns /api/auth/users/{id}/pfp or an absolute asset path
+  // like /img/blankpfp.jpg (the default avatar) — pass those through
+  if (pfp.startsWith('/')) return pfp;
   return `/api/auth/users/${pfp}/pfp`;
 }
