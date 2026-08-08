@@ -48,7 +48,8 @@ export async function renderAuth(el) {
       h('div', { class: 'pfp-picker' }, [
         h('img', { class: 'pfp-lg pfp-preview', src: '/img/blankpfp.jpg', alt: '' }),
         h('div', { class: 'pfp-picker-btns' }, [
-          h('input', { type: 'file', name: 'pfp', accept: 'image/jpeg,image/png' }),
+          h('input', { type: 'file', name: 'pfp', accept: 'image/jpeg,image/png', style: 'display:none' }),
+          h('button', { class: 'btn btn-ghost btn-sm', text: 'choose image' }),
           h('p', { class: 'muted small', text: 'or drop an image here' }),
         ]),
       ]),
@@ -56,6 +57,7 @@ export async function renderAuth(el) {
     let pfpFile = null;
     const pfpInput = pfp.querySelector('input');
     const pfpImg = pfp.querySelector('img');
+    pfp.querySelector('button').addEventListener('click', () => pfpInput.click());
     function setPfpFile(file) {
       pfpFile = file || null;
       if (file) {

@@ -457,7 +457,44 @@ function renderEdit(el, game) {
   const name = h('div', { class: 'field' }, [h('label', { text: 'name' }), h('input', { type: 'text', value: game.name })]);
   const desc = h('div', { class: 'field' }, [h('label', { text: 'description (optional)' }), h('textarea', {}, game.description || '')]);
   const reqs = createReqFields(game.system_requirements || '');
-  const cover = h('div', { class: 'field' }, [h('label', { text: 'cover image (optional, jpg/png)' }), h('input', { type: 'file', accept: 'image/jpeg,image/png' })]);
+  const cover = h('div', { class: 'field' }, [
+    h('label', { text: 'cover image (optional, jpg/png)' }),
+    h('div', { class: 'cover-picker' }, [
+      h('img', { class: 'cover-preview', alt: '', hidden: true }),
+      h('input', { type: 'file', accept: 'image/jpeg,image/png', style: 'display:none' }),
+      h('button', { class: 'btn btn-ghost btn-sm', text: 'choose image' }),
+      h('span', { class: 'muted small', text: 'or drop the artwork here' }),
+    ]),
+  ]);
+  const coverInput = cover.querySelector('input');
+  const coverImg = cover.querySelector('img');
+  const coverPicker = cover.querySelector('.cover-picker');
+  coverPicker.querySelector('button').addEventListener('click', () => coverInput.click());
+  coverInput.addEventListener('change', () => {
+    const f = coverInput.files[0];
+    if (f) {
+      const url = URL.createObjectURL(f);
+      coverImg.onload = () => URL.revokeObjectURL(url);
+      coverImg.src = url;
+      coverImg.hidden = false;
+    }
+  });
+  coverPicker.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    coverPicker.classList.add('drag-over');
+  });
+  coverPicker.addEventListener('dragleave', () => coverPicker.classList.remove('drag-over'));
+  coverPicker.addEventListener('drop', (e) => {
+    e.preventDefault();
+    coverPicker.classList.remove('drag-over');
+    const f = [...(e.dataTransfer?.files || [])].find((f) => /^image\/(jpeg|png)$/.test(f.type));
+    if (f) {
+      const dt = new DataTransfer();
+      dt.items.add(f);
+      coverInput.files = dt.files;
+      coverInput.dispatchEvent(new Event('change'));
+    }
+  });
   const save = h('button', { class: 'btn btn-primary', text: 'save' });
   const err = h('div', { class: 'form-error' });
   const panel = h('div', { class: 'panel' }, [

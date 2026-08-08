@@ -2,6 +2,7 @@ import { api, humanSize } from '../api.js';
 import { uploadChunks } from '../chunker.js';
 import { createReqFields } from '../reqfields.js';
 import { h, toast } from '../ui.js';
+import { navigate } from '../app.js';
 
 let session = null;
 let viewRoot = null;
@@ -68,6 +69,7 @@ async function cancelUpload() {
   } catch {}
   toast('upload cancelled');
   resetView();
+  if (location.hash === '#/upload') navigate('#/upload');
 }
 
 function resetView() {
@@ -103,8 +105,9 @@ function buildUploadView() {
     h('label', { text: 'cover image (optional, jpg/png)' }),
     h('div', { class: 'cover-picker' }, [
       h('img', { class: 'cover-preview', alt: '', hidden: true }),
-      h('input', { type: 'file', accept: 'image/jpeg,image/png' }),
-      h('p', { class: 'muted small', text: 'or drop the artwork here' }),
+      h('input', { type: 'file', accept: 'image/jpeg,image/png', style: 'display:none' }),
+      h('button', { class: 'btn btn-ghost btn-sm', text: 'choose image' }),
+      h('span', { class: 'muted small', text: 'or drop the artwork here' }),
     ]),
   ]);
   const coverInput = cover.querySelector('input');
@@ -122,6 +125,7 @@ function buildUploadView() {
       coverImg.hidden = true;
     }
   }
+  coverPicker.querySelector('button').addEventListener('click', () => coverInput.click());
   coverInput.addEventListener('change', () => setCoverFile(coverInput.files[0] || null));
   coverPicker.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -177,13 +181,36 @@ function buildUploadView() {
         folderBtn,
         folderState,
         startBtn,
-        h('button', { class: 'btn btn-ghost', text: 'cancel', onclick: () => (location.hash = '#/') }),
+        h('button', { class: 'btn btn-ghost', text: 'cancel', onclick: cancelAndReset }),
       ]),
       err,
     ]),
     progressPanel,
     preview,
   ]);
+
+  function clearStage() {
+    files = [];
+    setCoverFile(null);
+    folderState.textContent = '';
+    startBtn.disabled = true;
+    preview.replaceChildren();
+  }
+
+  async function cancelAndReset() {
+    if (session) {
+      session.cancelled = true;
+      session.controller.abort();
+      try {
+        await api.games.remove(session.gameId);
+      } catch {}
+      toast('upload cancelled');
+    } else {
+      toast('selection cleared');
+    }
+    resetView();
+    navigate('#/upload');
+  }
 
   const dropTarget = root.querySelector('.drop-target');
   const dropHint = root.querySelector('.drop-hint');

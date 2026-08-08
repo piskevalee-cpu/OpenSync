@@ -1203,6 +1203,16 @@ table.tbl {
   display: flex;
   gap: 16px;
   align-items: center;
+  padding: 12px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+}
+
+.pfp-picker-btns {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
 }
 
 .pfp-picker .pfp-preview {
