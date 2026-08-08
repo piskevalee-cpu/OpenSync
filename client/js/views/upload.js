@@ -189,14 +189,6 @@ function buildUploadView() {
     preview,
   ]);
 
-  function clearStage() {
-    files = [];
-    setCoverFile(null);
-    folderState.textContent = '';
-    startBtn.disabled = true;
-    preview.replaceChildren();
-  }
-
   async function cancelAndReset() {
     if (session) {
       session.cancelled = true;
@@ -249,7 +241,10 @@ function buildUploadView() {
     preview.replaceChildren(...files.slice(0, 20).map((f) => h('div', { class: 'upload-row-name small faint', text: f.webkitRelativePath })));
   }
 
-  folderBtn.onclick = () => picker.click();
+  folderBtn.onclick = () => {
+    if (!picker.isConnected) document.body.appendChild(picker);
+    picker.click();
+  };
 
   picker.onchange = () => setFiles([...picker.files]);
 
@@ -292,6 +287,7 @@ function buildUploadView() {
     const chunkSize = state.chunkSize;
 
     const controller = new AbortController();
+    let cancelled = false;
     const total = fileList.reduce((s, f) => s + f.size, 0);
     session = { gameId: game.id, name: nameVal, files: fileList, total, uploaded: 0, doneCount: 0, rate: 0, eta: null, controller, cancelled: false };
 
@@ -354,7 +350,7 @@ function buildUploadView() {
     let idx = 0;
     async function worker() {
       while (idx < fileList.length) {
-        if (session?.cancelled) return;
+        if (cancelled || session?.cancelled) return;
         const f = fileList[idx++];
         const r = rows.get(f.webkitRelativePath);
         const totalChunks = Math.max(1, Math.ceil(f.size / chunkSize));
@@ -392,6 +388,8 @@ function buildUploadView() {
           r.pct.textContent = '100%';
         } catch (e) {
           r.pct.textContent = '✕';
+          cancelled = true;
+          controller.abort();
           throw e;
         }
       }

@@ -1,4 +1,5 @@
 import { api, fmtDateTime, humanSize, pfpUrl } from '../api.js';
+import { currentRenderSeq } from '../app.js';
 import { confirmDialog, h, toast } from '../ui.js';
 
 let adminTimer = null;
@@ -19,7 +20,9 @@ function benchTable() {
 }
 
 export async function renderAdmin(el) {
+  const seq = currentRenderSeq();
   const [statsRes, usersRes] = await Promise.all([api.admin.stats(), api.admin.users()]);
+  if (currentRenderSeq() !== seq) return;
   const { stats } = statsRes;
   const { users } = usersRes;
 

@@ -4,8 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { DB_PATH, GAMES_ROOT, USERS_ROOT, STORAGE_ROOT } from './config.js';
 
-export const SCHEMA_VERSION = 1;
-
 const MIGRATIONS = [
   `
   CREATE TABLE IF NOT EXISTS users (
@@ -99,6 +97,9 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id);
   PRAGMA foreign_keys = ON;
   `,
+  `
+  UPDATE users SET pfp = '/api/auth/users/' || id || '/pfp' WHERE pfp IS NOT NULL;
+  `,
 ];
 
 let db = null;
@@ -112,10 +113,20 @@ export function ensureStorage() {
 export function getDb() {
   if (!db) {
     ensureStorage();
-    db = new DatabaseSync(DB_PATH);
-    db.exec('PRAGMA journal_mode = WAL;');
-    db.exec('PRAGMA foreign_keys = ON;');
-    migrate(db);
+    const candidate = new DatabaseSync(DB_PATH);
+    try {
+      candidate.exec('PRAGMA journal_mode = WAL;');
+      candidate.exec('PRAGMA foreign_keys = ON;');
+      migrate(candidate);
+    } catch (err) {
+      try {
+        candidate.close();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+    db = candidate;
   }
   return db;
 }

@@ -1,4 +1,4 @@
-import { api, esc, fmtDate } from '../api.js';
+import { api, fmtDate } from '../api.js';
 import { confirmDialog, h, toast } from '../ui.js';
 import { navigate } from '../app.js';
 

@@ -8,6 +8,8 @@ import { gameDir, gameFilesDir, gameManifestPath, gameUploadsDir, safeRelPath } 
 
 /** In-memory hashing progress per game (reset on server restart). */
 const manifestProgress = new Map();
+/** Games with a manifest build already in flight (prevents double hashing). */
+const processingGames = new Set();
 
 export function getManifestProgress(gameId) {
   return manifestProgress.get(Number(gameId)) || null;
@@ -66,20 +68,27 @@ export async function purgeUploads(gameId) {
 }
 
 export async function processGame(gameId, { announce = () => {} } = {}) {
-  const database = getDb();
-  const game = database.prepare('SELECT id FROM games WHERE id = ?').get(gameId);
-  if (!game) throw new Error('game not found');
-  announce({ status: GAME_STATUS.PROCESSING });
+  const id = Number(gameId);
+  if (processingGames.has(id)) return;
+  processingGames.add(id);
+  try {
+    const database = getDb();
+    const game = database.prepare('SELECT id FROM games WHERE id = ?').get(id);
+    if (!game) throw new Error('game not found');
+    announce({ status: GAME_STATUS.PROCESSING });
 
-  const { manifest, totalSize } = await generateManifest(gameId);
-  await purgeUploads(gameId);
+    const { manifest, totalSize } = await generateManifest(id);
+    await purgeUploads(id);
 
-  database
-    .prepare(`UPDATE games SET status = ?, total_size = ? WHERE id = ?`)
-    .run(GAME_STATUS.READY, totalSize, gameId);
+    database
+      .prepare(`UPDATE games SET status = ?, total_size = ? WHERE id = ?`)
+      .run(GAME_STATUS.READY, totalSize, id);
 
-  announce({ status: GAME_STATUS.READY, total_size: totalSize });
-  return manifest;
+    announce({ status: GAME_STATUS.READY, total_size: totalSize });
+    return manifest;
+  } finally {
+    processingGames.delete(id);
+  }
 }
 
 /**

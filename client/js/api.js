@@ -54,7 +54,6 @@ export const api = {
     uploadInit: (id) => api.post(`/api/games/${id}/upload/init`, {}),
     uploadComplete: (id) => api.post(`/api/games/${id}/upload/complete`, {}),
     overlayInit: (id) => api.get(`/api/games/${id}/overlay/init`),
-    overlay: (id) => api.get(`/api/games/${id}/overlay`),
     syncComplete: (id, deletions, force = false) => api.post(`/api/games/${id}/sync/complete`, { deletions, force }),
     clearOverlay: (id) => api.del(`/api/games/${id}/overlay`),
     cover: (id, body) => api.raw(`/api/games/${id}/cover`, { body, headers: { 'content-type': body.type } }),

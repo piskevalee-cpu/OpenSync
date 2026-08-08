@@ -1,5 +1,4 @@
 import path from 'node:path';
-import { stat } from 'node:fs/promises';
 import { GAMES_ROOT, USERS_ROOT } from './config.js';
 
 export function gameDir(gameId) {
@@ -60,29 +59,4 @@ export function safeRelPath(relPath) {
   if (path.posix.isAbsolute(norm)) return null;
   if (norm.startsWith('/')) return null;
   return norm;
-}
-
-export function manifestMatches(manifest, relPath) {
-  return manifest.files.find((f) => f.path === relPath) || null;
-}
-
-export async function fileExists(p) {
-  try {
-    await stat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function humanSize(bytes) {
-  if (!Number.isFinite(bytes)) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let v = bytes;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }

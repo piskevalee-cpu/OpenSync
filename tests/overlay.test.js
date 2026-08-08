@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { after } from 'node:test';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { createGame, headers, register, startServer, syncComplete, uploadOverlayFile } from './helpers.js';
 
@@ -10,7 +10,8 @@ const srv = await startServer();
 after(() => srv.close());
 
 test('overlay: changed, new, and deleted paths computed server-side', async () => {
-  const { cookie } = await register(srv.base, 'overlay_player');
+  const { cookie, user } = await register(srv.base, 'overlay_player');
+  const uid = String(user.id);
   const game = await createGame(srv.base, cookie, 'SyncGame', [
     { path: 'keep.bin', data: 'unchanged content' },
     { path: 'change.bin', data: 'original bytes' },
@@ -37,10 +38,10 @@ test('overlay: changed, new, and deleted paths computed server-side', async () =
   assert.equal(overlay.files, 2);
   assert.equal(overlay.deletions, 1);
 
-  const deletions = JSON.parse(await readFile(path.join(srv.dir, 'users', '1', 'games', String(game.id), 'deletions.json'), 'utf8'));
+  const deletions = JSON.parse(await readFile(path.join(srv.dir, 'users', uid, 'games', String(game.id), 'deletions.json'), 'utf8'));
   assert.deepEqual(deletions.paths, ['gone.bin']);
   assert.match(deletions.manifest_hash, /^[0-9a-f]{64}$/);
-  const om = JSON.parse(await readFile(path.join(srv.dir, 'users', '1', 'games', String(game.id), 'overlay_manifest.json'), 'utf8'));
+  const om = JSON.parse(await readFile(path.join(srv.dir, 'users', uid, 'games', String(game.id), 'overlay_manifest.json'), 'utf8'));
   const omByPath = new Map(om.files.map((f) => [f.path, f]));
   assert.equal(omByPath.get('change.bin').hash, changedHash);
   assert.equal(omByPath.get('new.bin').hash, addedHash);
@@ -139,4 +140,19 @@ test('overlay: mass deletions (>50% of the manifest) require force:true', async 
   assert.equal(forced.status, 200);
   const { overlay } = await forced.json();
   assert.equal(overlay.deletions, 3);
+});
+
+test('overlay: stale .part files are excluded from the rebuilt manifest', async () => {
+  const { cookie, user } = await register(srv.base, 'overlay_part');
+  const game = await createGame(srv.base, cookie, 'PartGame', [{ path: 'a.bin', data: 'base' }]);
+
+  const overlayRoot = path.join(srv.dir, 'users', String(user.id), 'games', String(game.id), 'overlay');
+  await mkdir(overlayRoot, { recursive: true });
+  await writeFile(path.join(overlayRoot, 'stale.bin.part'), 'partial bytes');
+
+  const done = await syncComplete(srv.base, cookie, game.id, []);
+  assert.equal(done.status, 200);
+  const { overlay } = await done.json();
+  assert.equal(overlay.files, 0, '.part files must never enter the overlay manifest');
+  assert.equal(existsSync(path.join(overlayRoot, 'stale.bin.part')), false, 'sync/complete must purge leftover part files');
 });

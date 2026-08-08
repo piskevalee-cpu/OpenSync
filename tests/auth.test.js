@@ -107,6 +107,28 @@ test('registration: explicitly provided but invalid pfp is still rejected', asyn
   assert.equal(res.status, 400);
 });
 
+test('pfp is stored and served via the per-user URL', async () => {
+  const pngB64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const res = await fetch(`${srv.base}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'pfp_user', password: 'secret123', pfp: `data:image/png;base64,${pngB64}` }),
+  });
+  assert.equal(res.status, 201);
+  const { user } = await res.json();
+  assert.equal(user.pfp, `/api/auth/users/${user.id}/pfp`, 'pfp must be a per-user URL, not /api/auth/me/pfp');
+
+  const img = await fetch(`${srv.base}${user.pfp}`);
+  assert.equal(img.status, 200, 'per-user pfp URL must serve the image');
+  assert.match(img.headers.get('content-type'), /image\/png/);
+
+  const me = await login(srv.base, 'pfp_user');
+  assert.equal(me.user.pfp, `/api/auth/users/${user.id}/pfp`);
+  const list = await fetch(`${srv.base}/api/users`, { headers: headers(me.cookie) });
+  const listed = (await list.json()).users.find((u) => u.username === 'pfp_user');
+  assert.equal(listed.pfp, `/api/auth/users/${user.id}/pfp`, 'users list must expose the per-user pfp URL');
+});
+
 test('protected routes require auth', async () => {
   const res = await fetch(`${srv.base}/api/games`);
   assert.equal(res.status, 401);

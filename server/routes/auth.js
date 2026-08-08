@@ -6,7 +6,7 @@ import { getDb, now } from '../db.js';
 import { DEFAULT_PFP_URL, ROLES, USERS_ROOT } from '../config.js';
 import { clearSessionCookie, createSessionCookie, hashPassword, requireAuth, revokeSessions, verifyPassword } from '../security.js';
 import { userPfpPath } from '../storage.js';
-import { cleanUsername, normalizeUsername } from '../usernames.js';
+import { cleanUsername, MAX_USERNAME_LENGTH, normalizeUsername } from '../usernames.js';
 
 export const authRouter = Router();
 
@@ -46,8 +46,8 @@ async function setPfp(req, res) {
   const file = userPfpPath(req.user.id).replace(/\.(jpg|png)$/, isPng ? '.png' : '.jpg');
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, buf);
-  database.prepare('UPDATE users SET pfp = ? WHERE id = ?').run('/api/auth/me/pfp', req.user.id);
-  res.json({ ok: true, pfp: '/api/auth/me/pfp' });
+  database.prepare('UPDATE users SET pfp = ? WHERE id = ?').run(`/api/auth/users/${req.user.id}/pfp`, req.user.id);
+  res.json({ ok: true, pfp: `/api/auth/users/${req.user.id}/pfp` });
 }
 
 authRouter.post('/register', async (req, res) => {
@@ -56,6 +56,9 @@ authRouter.post('/register', async (req, res) => {
   const cleaned = cleanUsername(username);
   if (!cleaned) {
     return res.status(400).json({ error: 'username is required' });
+  }
+  if (cleaned.length > MAX_USERNAME_LENGTH) {
+    return res.status(400).json({ error: `username too long (max ${MAX_USERNAME_LENGTH} characters)` });
   }
   if (typeof password !== 'string' || password.length < 6) {
     return res.status(400).json({ error: 'password must be at least 6 characters' });
@@ -84,7 +87,7 @@ authRouter.post('/register', async (req, res) => {
       const file = userPfpPath(info.lastInsertRowid).replace(/\.(jpg|png)$/, parsed.isPng ? '.png' : '.jpg');
       await mkdir(path.dirname(file), { recursive: true });
       await writeFile(file, parsed.buf);
-      database.prepare('UPDATE users SET pfp = ? WHERE id = ?').run('/api/auth/me/pfp', info.lastInsertRowid);
+      database.prepare('UPDATE users SET pfp = ? WHERE id = ?').run(`/api/auth/users/${info.lastInsertRowid}/pfp`, info.lastInsertRowid);
     } catch (err) {
       database.prepare('DELETE FROM users WHERE id = ?').run(info.lastInsertRowid);
       throw err;
@@ -169,6 +172,7 @@ authRouter.get('/me/pfp', (req, res) => {
 });
 
 authRouter.get('/users/:id/pfp', (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) return res.status(400).json({ error: 'invalid user id' });
   let file = userPfpPath(req.params.id);
   if (file && !existsSync(file)) {
     const png = file.replace(/\.(jpg|png)$/, '.png');

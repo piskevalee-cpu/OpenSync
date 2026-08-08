@@ -48,23 +48,3 @@ export async function confirmDialog(title, message, { danger = false } = {}) {
     document.body.appendChild(overlay);
   });
 }
-
-export function spinner(label) {
-  return h('div', { class: 'flex muted small' }, [h('span', { class: 'spinner' }), h('span', { text: label || 'working' })]);
-}
-
-export function disable(btn, disabled) {
-  btn.disabled = disabled;
-}
-
-export function setBusy(btn, busy, busyText = 'working…', idleText) {
-  if (busy) {
-    if (idleText == null) idleText = btn.dataset.text || btn.textContent;
-    btn.dataset.text = idleText;
-    btn.disabled = true;
-    btn.innerHTML = `<span class="spinner"></span> ${esc(busyText)}`;
-  } else {
-    btn.disabled = false;
-    if (btn.dataset.text) btn.textContent = btn.dataset.text;
-  }
-}

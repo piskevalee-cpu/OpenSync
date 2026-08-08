@@ -106,10 +106,6 @@ export function streamHash(readable, algo = 'sha256') {
   });
 }
 
-export function hashBuffer(buf) {
-  return createHash('sha256').update(buf).digest('hex');
-}
-
 export function attachUser(req, _res, next) {
   const cookies = parseCookies(req.headers.cookie);
   const payload = verifySession(cookies[COOKIE_NAME]);

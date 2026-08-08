@@ -24,6 +24,11 @@ const routes = [
 const topbar = document.getElementById('topbar');
 const viewEl = document.getElementById('view');
 
+let renderSeq = 0;
+export function currentRenderSeq() {
+  return renderSeq;
+}
+
 const BELL_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
 
 let notifOpen = false;
@@ -156,6 +161,7 @@ async function onLogout() {
 
 function route() {
   const found = routes.find((r) => r.match());
+  const seq = ++renderSeq;
   state.view = found.view;
   document.querySelector('.notif-drop')?.remove();
   notifOpen = false;

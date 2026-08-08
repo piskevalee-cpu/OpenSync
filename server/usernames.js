@@ -1,3 +1,5 @@
+export const MAX_USERNAME_LENGTH = 64;
+
 export function cleanUsername(raw) {
   if (typeof raw !== 'string') return null;
   const cleaned = raw.trim().normalize('NFC');

@@ -110,7 +110,7 @@ test('security: notifications are per-user; foreign ids 404', async () => {
   });
   const { unread: afterClear } = await (await fetch(`${srv.base}/api/notifications`, { headers: headers(userA.cookie) })).json();
   assert.equal(afterClear, 0);
-  assert.ok(before >= 0);
+  assert.ok(before > 0, 'user A must have had unread notifications before clearing');
 });
 
 test('security: clearing notifications only removes the caller\'s rows', async () => {
@@ -128,12 +128,11 @@ test('security: tampered and forged session cookies are rejected', async () => {
   assert.equal(me.status, 401);
 
   const [name, val] = userA.cookie.split('=');
-  const part = val.split('.');
-  if (part.length === 2) {
-    const tampered = `${name}=${part[0]}.${part[1].slice(0, -2)}xx`;
-    const res = await fetch(`${srv.base}/api/auth/me`, { headers: headers(tampered) });
-    assert.equal(res.status, 401);
-  }
+  const parts = val.split('.');
+  assert.equal(parts.length, 2, 'session token must be body.sig');
+  const tampered = `${name}=${parts[0]}.${parts[1].slice(0, -2)}xx`;
+  const res = await fetch(`${srv.base}/api/auth/me`, { headers: headers(tampered) });
+  assert.equal(res.status, 401);
 });
 
 test('security: logout kills the session and the old cookie no longer works', async () => {
@@ -184,4 +183,36 @@ test('security: comment text must be a string (no object/array smuggling)', asyn
     body: JSON.stringify({ text: { evil: true } }),
   });
   assert.equal(r.status, 400);
+});
+
+test('security: pfp endpoint rejects non-numeric user ids (traversal guard)', async () => {
+  const plain = await fetch(`${srv.base}/api/auth/users/abc/pfp`);
+  assert.equal(plain.status, 400);
+  const traversal = await fetch(`${srv.base}/api/auth/users/1%2F..%2F..%2Fserver%2Fserver-secret/pfp`);
+  assert.equal(traversal.status, 400);
+});
+
+test('security: usernames longer than 64 chars are rejected', async () => {
+  const res = await fetch(`${srv.base}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'u'.repeat(65), password: 'secret123' }),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('security: chunks larger than CHUNK_SIZE are rejected', async () => {
+  const big = Buffer.alloc(5 * 1024 * 1024, 0x41);
+  const res = await fetch(`${srv.base}/api/games/${game.id}/files`, {
+    method: 'POST',
+    headers: {
+      ...headers(admin.cookie),
+      'x-path': encodeURIComponent('huge.bin'),
+      'x-index': '0',
+      'x-total': '1',
+      'x-size': String(big.length),
+    },
+    body: new Uint8Array(big),
+  });
+  assert.equal(res.status, 413);
 });

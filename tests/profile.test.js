@@ -23,7 +23,7 @@ test('profile: /me stats start at zero and pfp is set from registration', async 
   adminCookie = admin.cookie;
   adminId = admin.user.id;
   const { user } = await (await fetch(`${srv.base}/api/auth/me`, { headers: headers(adminCookie) })).json();
-  assert.equal(user.pfp, '/api/auth/me/pfp');
+  assert.equal(user.pfp, `/api/auth/users/${adminId}/pfp`);
   assert.deepEqual(user.stats, { uploaded: 0, downloaded: 0, synced: 0 });
 });
 
@@ -63,10 +63,10 @@ test('profile: pfp upload and retrieval', async () => {
   assert.equal(posted.status, 200);
   const body = await posted.json();
   assert.equal(body.ok, true);
-  assert.equal(body.pfp, '/api/auth/me/pfp');
+  assert.equal(body.pfp, `/api/auth/users/${adminId}/pfp`);
 
   const { user } = await (await fetch(`${srv.base}/api/auth/me`, { headers: headers(adminCookie) })).json();
-  assert.equal(user.pfp, '/api/auth/me/pfp');
+  assert.equal(user.pfp, `/api/auth/users/${adminId}/pfp`);
 
   const img = await fetch(`${srv.base}/api/auth/me/pfp`, { headers: headers(adminCookie) });
   assert.equal(img.status, 200);

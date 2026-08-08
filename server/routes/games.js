@@ -30,6 +30,7 @@ function toPublicGame(row) {
     total_size: row.total_size,
     uploaded_by: row.uploaded_by,
     uploader_name: row.uploader_name,
+    uploader_pfp: row.uploader_pfp,
     created_at: row.created_at,
     download_count: row.download_count,
   };
@@ -245,13 +246,18 @@ gamesRouter.post('/:id/files', async (req, res, next) => {
     }
 
     const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
+    let chunkBytes = 0;
+    for await (const chunk of req) {
+      chunkBytes += chunk.length;
+      if (chunkBytes > CHUNK_SIZE) return res.status(413).json({ error: 'chunk too large' });
+      chunks.push(chunk);
+    }
     const buf = Buffer.concat(chunks);
     await appendFile(partPath, buf);
 
     database.prepare('UPDATE games SET last_activity_at = ? WHERE id = ?').run(now(), game.id);
 
-const partSize = current + buf.length;
+    const partSize = current + buf.length;
     if (index === total - 1) {
       if (partSize !== declaredSize) {
         await rm(partPath, { force: true });
@@ -327,5 +333,3 @@ gamesRouter.post('/:id/upload/complete', async (req, res, next) => {
     next(err);
   }
 });
-
-export { CHUNK_SIZE };

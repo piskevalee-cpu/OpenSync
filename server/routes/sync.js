@@ -84,8 +84,7 @@ syncRouter.post('/:id/overlay/files', async (req, res, next) => {
     });
 
     if (result.done) {
-      const info = await validateOverlayFile(req.user.id, req.params.id, relPath, declaredHash);
-      return res.json({ ok: true, done: true, file: info });
+      return res.json({ ok: true, done: true, file: result.file || null });
     }
     res.json({ ok: true, done: false, received: result.received });
   } catch (err) {

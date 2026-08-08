@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import { CLIENT_DIR, HOST, PORT, STORAGE_ROOT } from './config.js';
-import { ensureStorage, getDb, now } from './db.js';
+import { ensureStorage, getDb } from './db.js';
 import { attachUser } from './security.js';
 import { authRouter } from './routes/auth.js';
 import { gamesRouter } from './routes/games.js';
@@ -50,8 +50,11 @@ app.use((err, _req, res, _next) => {
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ error: 'invalid JSON body' });
   }
+  if (err.status && err.status < 500) {
+    return res.status(err.status).json({ error: err.message });
+  }
   console.error('[opensync] unhandled error:', err);
-  res.status(err.status || 500).json({ error: err.message || 'internal error' });
+  res.status(500).json({ error: 'internal server error' });
 });
 
 if (process.env.NODE_ENV !== 'test') {

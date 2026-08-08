@@ -172,12 +172,6 @@ a:hover {
   background: rgba(125, 250, 155, 0.08);
 }
 
-.badge-overlay {
-  color: var(--info);
-  border-color: rgba(107, 179, 255, 0.35);
-  background: rgba(107, 179, 255, 0.07);
-}
-
 .badge-synced {
   color: var(--info);
   border-color: rgba(107, 179, 255, 0.35);
@@ -271,18 +265,6 @@ button:disabled,
   overflow-x: auto;
 }
 
-.codebox .prompt {
-  color: var(--accent);
-}
-
-.codebox .cmt {
-  color: var(--faint);
-}
-
-.codebox .val {
-  color: var(--warn);
-}
-
 h1,
 h2,
 h3 {
@@ -341,6 +323,10 @@ h3 {
 
 .small {
   font-size: 12px;
+}
+
+.bold {
+  font-weight: 700;
 }
 
 /* ---------- forms ---------- */
@@ -587,6 +573,12 @@ h3 {
   margin: 0;
 }
 
+.stat-row dd.dd-uploader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* ---------- comments ---------- */
 
 .comment {
@@ -611,8 +603,107 @@ h3 {
   margin-top: 4px;
 }
 
-.comment-actions {
-  margin-left: auto;
+.composer {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.composer-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.composer-avatar-empty {
+  background: var(--panel-2);
+  border: 1px dashed var(--border);
+}
+
+.composer-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer-input-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.composer-input-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.composer-input-wrap textarea {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  min-height: 38px;
+  max-height: 180px;
+  resize: none;
+}
+
+.composer-input-wrap textarea:focus {
+  outline: none;
+}
+
+.composer-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.composer-hint {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.reply-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.reply-input-wrap {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.reply-input-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.reply-input-wrap input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+.reply-input-wrap input:focus {
+  outline: none;
 }
 
 /* ---------- progress / upload ---------- */

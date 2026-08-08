@@ -121,6 +121,10 @@ export async function rebuildOverlayManifest(userId, gameId) {
       if (e.isDirectory()) {
         await walk(path.posix.join(relDir, e.name));
       } else if (e.isFile()) {
+        if (e.name.endsWith('.part')) {
+          await rm(path.join(dir, relDir, e.name), { force: true }).catch(() => {});
+          continue;
+        }
         const rel = safeRelPath(path.posix.join(relDir, e.name));
         if (!rel) continue;
         const abs = path.join(dir, rel);

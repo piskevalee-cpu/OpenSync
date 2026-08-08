@@ -198,6 +198,7 @@ opensync            # live dashboard (fallback: one-shot status)
 | `status` | One-shot status report — pipeline-friendly. |
 | `logs` | Tails the server log (`tail -F`). |
 | `update` | `git pull --ff-only` + `npm install`, then restarts the service only if it was running. |
+| `help` | Prints the usage overview. |
 | `uninstall` | Stops the server, removes the `opensync` command itself (sudo prompt if needed), and asks whether to delete your data in `OPENSYNC_STORAGE` and the whole install directory (both default to no). |
 
 The CLI is a self-managed **PID-file service**: state lives in `storage/opensync.pid` (pid on the first line, port on the second). A service counts as *active* only when the process is alive **and** `GET /api/health` on `127.0.0.1:<port>` returns `{"ok":true}`.
@@ -214,7 +215,7 @@ Env overrides: `OPENSYNC_DIR` (repo root, defaults to the dir the command lives 
 - [x] Differential save sync (per-user overlays)
 - [ ] Remote (non-LAN) sync/relay mode
 - [ ] Rate limiting + admin throttling controls
-- [ ] Docker image
+- [x] Docker image
 - [ ] Mobile-friendly sync flow
 
 See the [open issues](https://github.com/piskevalee-cpu/OpenSync/issues) for a full list of proposed features (and known issues).

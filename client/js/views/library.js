@@ -1,7 +1,9 @@
-import { api, esc, fmtDate, humanSize, pfpUrl } from '../api.js';
+import { api, fmtDate, humanSize, pfpUrl } from '../api.js';
+import { currentRenderSeq } from '../app.js';
 import { h } from '../ui.js';
 
 export async function renderLibrary(el) {
+  const seq = currentRenderSeq();
   const hero = h('div', { class: 'hero' }, [
     h('h1', { class: 'page-title' }, 'game library'),
     h('p', { class: 'sub small' }, 'offline games, always on the LAN'),
@@ -11,6 +13,7 @@ export async function renderLibrary(el) {
   box.replaceChildren(h('div', { class: 'muted small flex', style: 'gap:8px;padding:12px 0;' }, [h('span', { class: 'spinner' }), h('span', { text: 'fetching library…' })]));
 
   const { games } = await api.games.list();
+  if (currentRenderSeq() !== seq) return;
   if (!games.length) {
     box.replaceChildren(h('div', { class: 'empty' }, [
       h('p', { text: 'no games on this server yet.' }),

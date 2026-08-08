@@ -16,6 +16,9 @@ export const downloadRouter = Router();
 downloadRouter.use(requireAuth);
 
 downloadRouter.get('/:id/manifest', (req, res) => {
+  const game = getDb().prepare('SELECT status FROM games WHERE id = ?').get(req.params.id);
+  if (!game) return res.status(404).json({ error: 'game not found' });
+  if (game.status !== 'ready') return res.status(409).json({ error: 'game is being processed' });
   const manifest = loadManifest(req.params.id);
   if (!manifest) return res.status(404).json({ error: 'manifest not found' });
   res.json(manifest);
@@ -26,8 +29,9 @@ downloadRouter.get('/:id/download', async (req, res, next) => {
     const gameId = Number(req.params.id);
     const manifest = loadManifest(gameId);
     if (!manifest) return res.status(404).json({ error: 'game not found or not ready' });
-    const game = getDb().prepare('SELECT name FROM games WHERE id = ?').get(gameId);
+    const game = getDb().prepare('SELECT name, status FROM games WHERE id = ?').get(gameId);
     if (!game) return res.status(404).json({ error: 'game not found' });
+    if (game.status !== 'ready') return res.status(409).json({ error: 'game is being processed' });
 
     const fresh = req.query.fresh === '1' || req.query.fresh === 'true';
     const { files } = fresh

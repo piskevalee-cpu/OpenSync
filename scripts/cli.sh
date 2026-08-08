@@ -14,8 +14,17 @@
 #   help           show this help
 set -euo pipefail
 
-SOURCE="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-ROOT="$(cd "$(dirname "$(dirname "$SOURCE")")" && pwd)"
+# Resolve the script path portably (macOS has no `readlink -f`).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$DIR/$TARGET" ;;
+  esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 ROOT="${OPENSYNC_DIR:-$ROOT}"
 
 source "$ROOT/scripts/lib.sh" || { echo "cannot find scripts/lib.sh (repo root: $ROOT)" >&2; exit 1; }
@@ -172,7 +181,7 @@ cmd_stop() {
 }
 
 cmd_restart() {
-  cmd_stop
+  cmd_stop || true
   cmd_start
 }
 
@@ -205,7 +214,7 @@ cmd_update() {
   run_spinner "installing dependencies (npm install)" -- npm install --prefix "$ROOT"
   if [ "$was_active" = 1 ]; then
     info "restarting service…"
-    cmd_stop
+    cmd_stop || true
     cmd_start
   else
     ok "update done (server was not running)"
@@ -328,11 +337,11 @@ cmd_dashboard() {
           cmd_stop >/dev/null 2>&1 || true
           break
           ;;
-        [sS]|r)
+        [sS]|[rR])
           case "$key" in
             s) cmd_start >/dev/null 2>&1 || true ;;
             S) cmd_stop  >/dev/null 2>&1 || true ;;
-            r) cmd_restart >/dev/null 2>&1 || true ;;
+            r|R) cmd_restart >/dev/null 2>&1 || true ;;
           esac
           prev=""
           ;;

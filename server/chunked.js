@@ -43,13 +43,20 @@ export async function receiveChunk({ rootDir, relPath, index, total, declaredSiz
     throw err;
   }
 
-  const tmpPath = `${partPath}.tmp`;
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let receivedBytes = 0;
+  for await (const chunk of req) {
+    receivedBytes += chunk.length;
+    if (receivedBytes > CHUNK_SIZE) {
+      const err = new Error('chunk too large');
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
   const buf = Buffer.concat(chunks);
   // appendFile preserves the already-received prefix (chunks arrive sequentially)
   await appendFile(partPath, buf);
-  await rm(tmpPath, { force: true });
 
   const partSize = current + buf.length;
   if (index === total - 1) {
@@ -62,10 +69,8 @@ export async function receiveChunk({ rootDir, relPath, index, total, declaredSiz
     const finalPath = path.join(rootDir, relPath);
     await mkdir(path.dirname(finalPath), { recursive: true });
     await rename(partPath, finalPath);
-    if (validate) await validate(relPath, finalPath);
+    if (validate) return { done: true, file: await validate(relPath, finalPath) };
     return { done: true };
   }
   return { done: false, received: Math.floor(partSize / CHUNK_SIZE) };
 }
-
-export { safeRelPath };

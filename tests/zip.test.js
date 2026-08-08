@@ -81,7 +81,7 @@ test('download is logged and counted', async () => {
 });
 
 test('unauthenticated download is rejected', async () => {
-  const res = await fetch(`${srv.base}/api/games/1/download`);
+  const res = await fetch(`${srv.base}/api/games/999999/download`);
   assert.equal(res.status, 401);
 });
 

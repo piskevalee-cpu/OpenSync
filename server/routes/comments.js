@@ -44,8 +44,7 @@ const COMMENT_SELECT = `
 `;
 
 function notifyReply(database, parent, gameId, replierName) {
-  if (parent.user_id === null) return;
-  if (parent.user_id === undefined) return;
+  if (parent.user_id == null) return;
   database
     .prepare(
       `INSERT INTO notifications (user_id, type, title, body, link, created_at)
@@ -82,7 +81,7 @@ commentsRouter.post('/games/:id/comments', (req, res) => {
     .prepare('INSERT INTO comments (game_id, user_id, text, parent_id, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(req.params.id, req.user.id, text.trim(), parent ? parent.id : null, now());
   const comment = database.prepare(`${COMMENT_SELECT} WHERE c.id = ?`).get(info.lastInsertRowid);
-  const exclude = [];
+  const exclude = [req.user.id];
   if (parent && parent.user_id !== req.user.id) {
     notifyReply(database, parent, req.params.id, req.user.username);
     exclude.push(parent.user_id);
