@@ -41,22 +41,21 @@ export async function renderProfile(el, state) {
     statGrid,
   ]);
 
-  const pfpInput = h('input', { type: 'file', accept: 'image/jpeg,image/png' });
-  const saveBtn = h('button', { class: 'btn btn-primary', text: 'save pfp' });
   const pfpErr = h('div', { class: 'form-error' });
-  const dropHint = h('p', { class: 'muted small', text: '…or just drop a new picture here' });
   const pfpPanel = h('div', { class: 'panel', id: 'pfp-panel' }, [
     h('h3', { text: 'change profile picture' }),
-    h('div', { class: 'flex' }, [pfpInput, saveBtn]),
-    dropHint,
+    h('div', { class: 'pfp-dropzone' }, [
+      h('p', { class: 'muted small', text: 'drop a new picture (jpg/png) here — it saves instantly' }),
+    ]),
+    h('div', { class: 'flex', style: 'margin-top:10px;' }, [
+      h('button', { class: 'btn btn-ghost btn-sm', text: 'remove profile picture', hidden: state.user.pfp === '/img/blankpfp.jpg', onclick: removePfp }),
+    ]),
     pfpErr,
   ]);
 
   let busy = false;
   async function uploadPfpFile(file) {
     pfpErr.textContent = '';
-    saveBtn.disabled = true;
-    saveBtn.textContent = '…';
     try {
       await api.auth.uploadPfp(file);
       toast('profile picture saved');
@@ -64,17 +63,22 @@ export async function renderProfile(el, state) {
       navigate('#/profile');
     } catch (err) {
       pfpErr.textContent = err.message;
-      saveBtn.disabled = false;
-      saveBtn.textContent = 'save pfp';
     } finally {
       busy = false;
     }
   }
 
-  saveBtn.onclick = () => {
-    const file = pfpInput.files[0];
-    if (file) uploadPfpFile(file);
-  };
+  async function removePfp() {
+    pfpErr.textContent = '';
+    try {
+      await api.auth.removePfp();
+      toast('profile picture removed');
+      await refresh();
+      navigate('#/profile');
+    } catch (err) {
+      pfpErr.textContent = err.message;
+    }
+  }
 
   pfpPanel.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -86,9 +90,6 @@ export async function renderProfile(el, state) {
     pfpPanel.classList.remove('drag-over');
     const file = [...(e.dataTransfer?.files || [])].find((f) => /^image\/(jpeg|png)$/.test(f.type));
     if (file && !busy) {
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      pfpInput.files = dt.files;
       busy = true;
       uploadPfpFile(file);
     }

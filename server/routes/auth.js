@@ -144,6 +144,18 @@ authRouter.put('/me/pfp', requireAuth, async (req, res, next) => {
   }
 });
 
+authRouter.delete('/me/pfp', requireAuth, async (req, res, next) => {
+  try {
+    const database = getDb();
+    const file = userPfpPath(req.user.id);
+    await Promise.allSettled([rm(file, { force: true }), rm(file.replace(/\.(jpg|png)$/, '.png'), { force: true })]);
+    database.prepare('UPDATE users SET pfp = NULL WHERE id = ?').run(req.user.id);
+    res.json({ ok: true, pfp: DEFAULT_PFP_URL });
+  } catch (err) {
+    next(err);
+  }
+});
+
 authRouter.get('/me/pfp', (req, res) => {
   const id = req.user?.id;
   let file = id ? userPfpPath(id) : '';

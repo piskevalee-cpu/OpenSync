@@ -101,8 +101,44 @@ function buildUploadView() {
   const reqs = createReqFields();
   const cover = h('div', { class: 'field' }, [
     h('label', { text: 'cover image (optional, jpg/png)' }),
-    h('input', { type: 'file', accept: 'image/jpeg,image/png' }),
+    h('div', { class: 'cover-picker' }, [
+      h('img', { class: 'cover-preview', alt: '', hidden: true }),
+      h('input', { type: 'file', accept: 'image/jpeg,image/png' }),
+      h('p', { class: 'muted small', text: 'or drop the artwork here' }),
+    ]),
   ]);
+  const coverInput = cover.querySelector('input');
+  const coverImg = cover.querySelector('img');
+  const coverPicker = cover.querySelector('.cover-picker');
+  let coverFile = null;
+  function setCoverFile(file) {
+    coverFile = file || null;
+    if (file) {
+      const url = URL.createObjectURL(file);
+      coverImg.onload = () => URL.revokeObjectURL(url);
+      coverImg.src = url;
+      coverImg.hidden = false;
+    } else {
+      coverImg.hidden = true;
+    }
+  }
+  coverInput.addEventListener('change', () => setCoverFile(coverInput.files[0] || null));
+  coverPicker.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    coverPicker.classList.add('drag-over');
+  });
+  coverPicker.addEventListener('dragleave', () => coverPicker.classList.remove('drag-over'));
+  coverPicker.addEventListener('drop', (e) => {
+    e.preventDefault();
+    coverPicker.classList.remove('drag-over');
+    const file = [...(e.dataTransfer?.files || [])].find((f) => /^image\/(jpeg|png)$/.test(f.type));
+    if (file) {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      coverInput.files = dt.files;
+      setCoverFile(file);
+    }
+  });
   const folderBtn = h('button', { class: 'btn', text: 'select folder…' });
   const folderState = h('span', { class: 'muted small' });
   const picker = h('input', { type: 'file', style: 'display:none' });

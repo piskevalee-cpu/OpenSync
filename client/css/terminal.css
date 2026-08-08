@@ -1211,6 +1211,31 @@ table.tbl {
   font-size: 28px;
 }
 
+.pfp-dropzone {
+  margin-top: 4px;
+  padding: 22px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  text-align: center;
+}
+
+.cover-picker {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+}
+
+.cover-preview {
+  max-width: 160px;
+  max-height: 90px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  object-fit: cover;
+}
+
 .drag-over {
   outline: 2px dashed var(--accent);
   outline-offset: -6px;

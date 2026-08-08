@@ -40,6 +40,7 @@ export const api = {
     logout: () => api.post('/api/auth/logout', {}),
     me: () => api.get('/api/auth/me'),
     uploadPfp: (body) => request('PUT', '/api/auth/me/pfp', { body, headers: { 'content-type': body.type } }),
+    removePfp: () => request('DELETE', '/api/auth/me/pfp'),
     deleteAccount: () => api.del('/api/auth/me'),
   },
   games: {
