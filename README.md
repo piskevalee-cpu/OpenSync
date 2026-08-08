@@ -208,13 +208,28 @@ Env overrides: `OPENSYNC_DIR` (repo root, defaults to the dir the command lives 
 <!-- ROADMAP -->
 ## Roadmap
 
-- [x] Upload & storage with per-file hash manifests
-- [x] Auth, roles, comments, notifications
-- [x] Differential save sync (per-user overlays)
-- [ ] Remote (non-LAN) sync/relay mode
-- [ ] Rate limiting + admin throttling controls
-- [ ] Docker image
-- [ ] Mobile-friendly sync flow
+**Shipped**
+
+- [x] Upload & storage with per-file hash manifests (resumable 4 MB chunked uploads)
+- [x] Auth, roles, threaded comments with @mentions, notifications
+- [x] Differential save sync — per-user overlays merged on the fly into streaming zips
+- [x] Docker image published to ghcr.io (amd64) + `docker-compose.yml`
+- [x] `opensync` CLI service manager (dashboard / start / stop / logs / update / uninstall)
+
+**Next up**
+
+- [ ] Rate limiting + admin throttling (brute-force guard on auth, upload/download caps)
+- [ ] Backup & migration: `opensync backup` (SQLite + storage archive) and per-game export/import
+- [ ] Headless save sync: background `opensync sync <folder>` command with a file watcher — no browser needed
+- [ ] Admin usage dashboard: per-user bandwidth and storage numbers
+- [ ] Game versioning: keep re-upload snapshots (overlays already pin to the manifest hash)
+
+**Later / experimental**
+
+- [ ] Remote (non-LAN) sync mode — VPN/tunnel friendly; Tailscale-friendly setup guide
+- [ ] Private games & per-user sharing visibility controls
+- [ ] Mobile-friendly sync UI
+- [ ] ARM64 (multi-arch) Docker images — until then `install.sh` covers Pi/NAS
 
 See the [open issues](https://github.com/piskevalee-cpu/OpenSync/issues) for a full list of proposed features (and known issues).
 
