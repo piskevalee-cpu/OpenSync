@@ -1,0 +1,13 @@
+node_modules
+.git
+storage
+tests
+Art
+scripts
+install.sh
+*.log
+docker-compose.yml
+AGENTS.md
+README.md
+.github
+.gitignore
