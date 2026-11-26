@@ -6,10 +6,11 @@ use opensync_proton::{
     wrap_launch_for_flatpak_host,
 };
 use opensync_sync::{SyncReport, sync_game_saves};
+use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
-#[cfg(target_os = "macos")]
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::process::Command;
@@ -178,6 +179,14 @@ pub struct LaunchOptions {
     pub heartbeat_interval: Duration,
     pub extra_args: Vec<String>,
     pub prefixes_root: PathBuf,
+    /// Per-game prefix override. `None` uses `<prefixes_root>/<game_id>`.
+    pub prefix_override: Option<PathBuf>,
+    /// User-supplied environment variables. Applied after the runtime's own values so a
+    /// deliberate override (e.g. `STEAM_COMPAT_DATA_PATH`) wins.
+    pub extra_env: Vec<(String, String)>,
+    /// When set, the game's stdout and stderr are appended here instead of inheriting the
+    /// launcher's terminal, so the UI can show a real log after a launch fails.
+    pub log_path: Option<PathBuf>,
 }
 
 impl Default for LaunchOptions {
@@ -188,8 +197,91 @@ impl Default for LaunchOptions {
             heartbeat_interval: Duration::from_secs(5),
             extra_args: Vec::new(),
             prefixes_root: PathBuf::from("./prefixes"),
+            prefix_override: None,
+            extra_env: Vec::new(),
+            log_path: None,
         }
     }
+}
+
+/// Splits a user-entered argument string into argv entries. Single and double quotes group
+/// spaces, and a backslash can escape a quote, space or another backslash (a trailing
+/// backslash is kept literally). Unclosed quotes are accepted so typing is forgiving.
+pub fn parse_launch_args(raw: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == '\\' && q == '"' {
+                match chars.peek().copied() {
+                    Some(next @ ('"' | '\\')) => {
+                        current.push(next);
+                        chars.next();
+                    }
+                    _ => current.push(c),
+                }
+            } else {
+                current.push(c);
+            }
+            continue;
+        }
+
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                started = true;
+            }
+            '\\' => match chars.peek().copied() {
+                Some(next) if next.is_whitespace() || matches!(next, '"' | '\'' | '\\') => {
+                    current.push(next);
+                    chars.next();
+                    started = true;
+                }
+                _ => {
+                    current.push(c);
+                    started = true;
+                }
+            },
+            c if c.is_whitespace() => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            _ => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        args.push(current);
+    }
+    args
+}
+
+const GAME_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Opens (or rotates) the per-game log file and writes a session header. The returned handle
+/// is cloned into the child's stdout/stderr so output from both streams stays interleaved.
+fn open_game_log(path: &Path, header: &str) -> std::io::Result<File> {
+    if let Ok(meta) = fs::metadata(path)
+        && meta.len() > GAME_LOG_MAX_BYTES
+    {
+        let rotated = path.with_extension("old.log");
+        let _ = fs::remove_file(&rotated);
+        let _ = fs::rename(path, rotated);
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{header}")?;
+    file.flush()?;
+    Ok(file)
 }
 
 /// Resolves the command to execute for an installed game (using saved override or auto-discovery).
@@ -198,6 +290,7 @@ pub fn resolve_launch_command(
     proton: Option<&ProtonInstallation>,
     prefixes_root: &Path,
     extra_args: &[String],
+    prefix_override: Option<&Path>,
 ) -> RunnerResult<LaunchCommandSpec> {
     let exe = if let Some(rel) = &game.executable_rel_path {
         let abs = game.install_dir.join(rel);
@@ -225,7 +318,9 @@ pub fn resolve_launch_command(
             .ok_or_else(|| RunnerError::NoExecutableFound(game.install_dir.clone()))?
     };
 
-    let prefix_dir = prefixes_root.join(game.game_id.to_string());
+    let prefix_dir = prefix_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| prefixes_root.join(game.game_id.to_string()));
     Ok(build_launch_command(&exe, &prefix_dir, proton, extra_args)?)
 }
 
@@ -256,22 +351,58 @@ pub async fn launch_and_track_with_hook<F>(
 where
     F: FnOnce(u64, Option<i32>),
 {
-    let spec = wrap_launch_for_flatpak_host(resolve_launch_command(
+    let mut spec = resolve_launch_command(
         game,
         proton,
         &options.prefixes_root,
         &options.extra_args,
-    )?);
+        options.prefix_override.as_deref(),
+    )?;
+
+    // User variables are applied last: they deliberately win over Proton's defaults and are
+    // also forwarded by the Flatpak host wrapper, which reads `spec.env`.
+    if !options.extra_env.is_empty() {
+        let user_keys: HashSet<&str> = options
+            .extra_env
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        spec.env
+            .retain(|(key, _)| !user_keys.contains(key.as_str()));
+        spec.env.extend(options.extra_env.iter().cloned());
+    }
+    let spec = wrap_launch_for_flatpak_host(spec);
+
+    let started_at = Utc::now();
+    let log_file = match &options.log_path {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let header = format!(
+                "\n===== {} · {} · runtime: {} =====\n",
+                started_at.to_rfc3339(),
+                game.name,
+                spec.runtime_label
+            );
+            Some(open_game_log(path, &header)?)
+        }
+        None => None,
+    };
 
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .current_dir(&spec.working_dir)
         .kill_on_drop(false);
+    if let Some(file) = &log_file {
+        let stdout = file.try_clone()?;
+        let stderr = file.try_clone()?;
+        cmd.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
+    }
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
 
-    let started_at = Utc::now();
     let mono_start = Instant::now();
     let mut clock = SessionClock::start(started_at);
     let mut child = cmd.spawn()?;

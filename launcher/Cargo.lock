@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "launcher-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "launcher-db"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "launcher-tauri"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2500,7 +2500,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opensync-api"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "bytes",
  "itoa",
@@ -2515,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "opensync-proton"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "flate2",
  "futures-util",
@@ -2531,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "opensync-runner"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "flate2",
@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "opensync-sync"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "bytes",
  "hex",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "opensync-transfer"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "bytes",
  "crc32fast",

@@ -229,6 +229,18 @@ function createMockRuntime() {
   let nextJobSeq = 2;
   const uploads = [];
   let nextUploadSeq = 1;
+  // Per-game stdout/stderr preview, keyed by game id.
+  const gameLogs = new Map([
+    [
+      1,
+      [
+        '===== session · Fogwoods · runtime: native =====',
+        'Initializing renderer…',
+        'Audio device: default',
+        'Save directory ready.',
+      ],
+    ],
+  ]);
 
   const profiles = [
     {
@@ -399,6 +411,9 @@ function createMockRuntime() {
       ],
       binary_kind: 'LinuxElf',
       proton_override: null,
+      wine_prefix: null,
+      launch_args: null,
+      env_vars: [],
       last_synced_at: new Date(Date.now() - 32 * 60 * 1000).toISOString(),
       pending_sync: false,
       playtime: {
@@ -428,6 +443,9 @@ function createMockRuntime() {
       ],
       binary_kind: 'WindowsPe',
       proton_override: null,
+      wine_prefix: null,
+      launch_args: null,
+      env_vars: [],
       last_synced_at: null,
       pending_sync: false,
       playtime: {
@@ -458,6 +476,9 @@ function createMockRuntime() {
       ],
       binary_kind: 'WindowsPe',
       proton_override: 'GE-Proton9-25',
+      wine_prefix: null,
+      launch_args: '--windowed',
+      env_vars: [{ key: 'DXVK_HUD', value: 'full' }],
       last_synced_at: new Date(Date.now() - 4 * 3600 * 1000).toISOString(),
       pending_sync: true,
       playtime: {
@@ -485,6 +506,9 @@ function createMockRuntime() {
       discovered_executables: [],
       binary_kind: 'LinuxElf',
       proton_override: null,
+      wine_prefix: null,
+      launch_args: null,
+      env_vars: [],
       last_synced_at: null,
       pending_sync: false,
       playtime: {
@@ -512,6 +536,9 @@ function createMockRuntime() {
       discovered_executables: [],
       binary_kind: 'WindowsPe',
       proton_override: null,
+      wine_prefix: null,
+      launch_args: null,
+      env_vars: [],
       last_synced_at: null,
       pending_sync: false,
       playtime: {
@@ -541,6 +568,9 @@ function createMockRuntime() {
       ],
       binary_kind: 'LinuxElf',
       proton_override: null,
+      wine_prefix: null,
+      launch_args: null,
+      env_vars: [],
       last_synced_at: new Date(Date.now() - 2 * 86400 * 1000).toISOString(),
       pending_sync: false,
       playtime: {
@@ -737,6 +767,9 @@ function createMockRuntime() {
               discovered_executables: [],
               binary_kind: 'LinuxElf',
               proton_override: null,
+              wine_prefix: null,
+              launch_args: null,
+              env_vars: [],
               last_synced_at: null,
               pending_sync: false,
               playtime: { total_secs: 0, session_count: 0, last_played_at: null },
@@ -1040,6 +1073,15 @@ function createMockRuntime() {
           if (!g || !g.installed) throw new Error('Game is not installed');
           playingMockGames.add(g.game_id);
           const runtime = g.proton_override || (g.binary_kind === 'windows_pe' ? 'GE-Proton9-25' : 'native');
+          const lines = gameLogs.get(g.game_id) || [];
+          lines.push(
+            `===== ${new Date().toISOString()} · ${g.name} · runtime: ${runtime} =====`,
+            `Launch arguments: ${g.launch_args || '(none)'}`,
+            `Custom prefix: ${g.wine_prefix || '(automatic)'}`,
+            ...(g.env_vars || []).map((v) => `${v.key}=${v.value}`),
+            'Process started.',
+          );
+          gameLogs.set(g.game_id, lines.slice(-400));
           pushMockActivity({
             game_id: g.game_id,
             game_name: g.name,
@@ -1176,6 +1218,35 @@ function createMockRuntime() {
           const g = games.find((x) => x.game_id === args.game_id);
           if (!g) throw new Error('Game not found');
           g.proton_override = args.proton_name || null;
+          return true;
+        }
+
+        case 'set_game_launch_config': {
+          const g = games.find((x) => x.game_id === args.game_id);
+          if (!g) throw new Error('Game not found');
+          const config = args.config || {};
+          for (const v of config.env_vars || []) {
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(v.key || '')) {
+              throw new Error(`Invalid environment variable name: ${v.key}`);
+            }
+          }
+          g.wine_prefix = config.wine_prefix || null;
+          g.launch_args = config.launch_args || null;
+          g.env_vars = (config.env_vars || []).map((v) => ({ key: v.key, value: v.value }));
+          return true;
+        }
+
+        case 'pick_wine_prefix_dir': {
+          return '/home/user/Games/OpenSync/prefixes';
+        }
+
+        case 'get_game_log': {
+          const lines = gameLogs.get(args.game_id) || [];
+          return lines.length ? lines.slice(-400).join('\n') : null;
+        }
+
+        case 'clear_game_log': {
+          gameLogs.delete(args.game_id);
           return true;
         }
 
@@ -1604,6 +1675,12 @@ export const bridge = {
     invokeCmd('set_game_executable', { game_id, rel_path }),
   setGameProton: (game_id, proton_name) =>
     invokeCmd('set_game_proton', { game_id, proton_name }),
+  setGameLaunchConfig: (game_id, config) =>
+    invokeCmd('set_game_launch_config', { game_id, config }),
+  pickWinePrefixDir: () => invokeCmd('pick_wine_prefix_dir'),
+  getGameLog: (game_id, max_bytes = 64 * 1024) =>
+    invokeCmd('get_game_log', { game_id, max_bytes }),
+  clearGameLog: (game_id) => invokeCmd('clear_game_log', { game_id }),
   listProtonInstallations: () => invokeCmd('list_proton_installations'),
   fetchLatestGeProton: () => invokeCmd('fetch_latest_ge_proton'),
   downloadGeProton: (release) => invokeCmd('download_ge_proton', { release }),

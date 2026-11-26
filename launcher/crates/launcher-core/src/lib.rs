@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
 use launcher_db::{
-    ActiveSessionRecord, ActivityLogEntry, DbError, InstalledGame, LauncherDb, PendingSync,
-    PlaytimeSummary, Profile, SecretStore,
+    ActiveSessionRecord, ActivityLogEntry, DbError, GameEnvVar, GameLaunchConfig, InstalledGame,
+    LauncherDb, PendingSync, PlaytimeSummary, Profile, SecretStore,
 };
 use opensync_api::{ApiError, Game, OpenSyncClient, User, safe_image_mime};
 use opensync_proton::{
@@ -11,6 +11,7 @@ use opensync_proton::{
 };
 use opensync_runner::{
     LaunchOptions, PostExitSyncStatus, RunnerError, SessionOutcome, launch_and_track_with_hook,
+    parse_launch_args,
 };
 use opensync_sync::{
     DirFingerprint, SyncError, SyncReport, compute_dir_fingerprint, inspect_unsynced_saves,
@@ -62,6 +63,8 @@ pub enum CoreError {
     UnsafeGameSlug(String),
     #[error("install directory escapes the games directory: {0}")]
     UnsafeInstallDir(PathBuf),
+    #[error("invalid launch option: {0}")]
+    InvalidLaunchOption(String),
     #[error("reconnect failed after {attempts} attempts: {last_error}")]
     ReconnectExhausted { attempts: u32, last_error: String },
 }
@@ -308,6 +311,7 @@ pub struct LauncherPaths {
     pub proton_dir: PathBuf,
     pub prefixes_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub logs_dir: PathBuf,
 }
 
 impl LauncherPaths {
@@ -318,6 +322,7 @@ impl LauncherPaths {
             proton_dir: r.join("proton"),
             prefixes_dir: r.join("prefixes"),
             cache_dir: r.join("cache"),
+            logs_dir: r.join("logs"),
         }
     }
 }
@@ -470,6 +475,36 @@ impl LauncherCore {
 
     pub fn paths(&self) -> &LauncherPaths {
         &self.paths
+    }
+
+    /// Log file a game's stdout/stderr is captured into for this profile-independent game id.
+    pub fn game_log_path(&self, game_id: i64) -> PathBuf {
+        self.paths.logs_dir.join(format!("{game_id}.log"))
+    }
+
+    /// Reads the tail of a game's captured output, trimming a partial first line.
+    pub fn read_game_log(&self, game_id: i64, max_bytes: usize) -> CoreResult<Option<String>> {
+        let path = self.game_log_path(game_id);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let mut start = bytes.len().saturating_sub(max_bytes);
+        if start > 0
+            && let Some(offset) = bytes[start..].iter().position(|b| *b == b'\n')
+        {
+            start += offset + 1;
+        }
+        Ok(Some(String::from_utf8_lossy(&bytes[start..]).into_owned()))
+    }
+
+    pub fn clear_game_log(&self, game_id: i64) -> CoreResult<()> {
+        match std::fs::remove_file(self.game_log_path(game_id)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Current destination root for downloaded games.
@@ -2430,6 +2465,119 @@ impl LauncherCore {
         Ok(())
     }
 
+    /// Atomically saves the custom prefix, launch arguments and environment variables for a
+    /// game. Empty values clear the override and restore automatic behaviour. This works for
+    /// games that are still in the library but not yet installed.
+    pub async fn set_game_launch_config(
+        &self,
+        game_id: i64,
+        wine_prefix: Option<String>,
+        launch_args: Option<String>,
+        env_vars: Vec<GameEnvVar>,
+    ) -> CoreResult<()> {
+        let profile = self
+            .active_profile()
+            .await
+            .ok_or(CoreError::NoActiveProfile)?;
+
+        let prefix = wine_prefix.and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.contains('\0') {
+                return None;
+            }
+            let home = std::env::var("HOME")
+                .ok()
+                .filter(|h| !h.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("USERPROFILE")
+                        .ok()
+                        .filter(|h| !h.trim().is_empty())
+                })
+                .map(PathBuf::from);
+            let expanded = if trimmed == "~" {
+                home.clone()
+            } else {
+                trimmed.strip_prefix("~/").map(|rest| {
+                    home.as_ref()
+                        .map(|h| h.join(rest))
+                        .unwrap_or_else(|| PathBuf::from(rest))
+                })
+            };
+            let path = expanded.unwrap_or_else(|| PathBuf::from(trimmed));
+            let absolute = if path.is_absolute() {
+                path
+            } else {
+                self.paths
+                    .prefixes_dir
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(path)
+            };
+            Some(absolute.to_string_lossy().into_owned())
+        });
+
+        let args = launch_args.and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        if args.as_ref().is_some_and(|a| a.len() > 8192) {
+            return Err(CoreError::InvalidLaunchOption(
+                "launch arguments are too long (8192 character limit)".to_string(),
+            ));
+        }
+
+        let mut clean_vars: Vec<GameEnvVar> = Vec::new();
+        for var in env_vars {
+            let key = var.key.trim();
+            let value = var.value.trim();
+            let valid_key = !key.is_empty()
+                && key.len() <= 256
+                && key.chars().enumerate().all(|(i, c)| {
+                    if i == 0 {
+                        c == '_' || c.is_ascii_alphabetic()
+                    } else {
+                        c == '_' || c.is_ascii_alphanumeric()
+                    }
+                });
+            if !valid_key {
+                return Err(CoreError::InvalidLaunchOption(format!(
+                    "invalid environment variable name: {key:?} (use A-Z, 0-9 and _, not starting with a digit)"
+                )));
+            }
+            if value.len() > 8192 {
+                return Err(CoreError::InvalidLaunchOption(format!(
+                    "value for {key} is too long (8192 character limit)"
+                )));
+            }
+            if let Some(existing) = clean_vars.iter_mut().find(|v| v.key == key) {
+                existing.value = value.to_string();
+            } else {
+                clean_vars.push(GameEnvVar {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                });
+            }
+        }
+        if clean_vars.len() > 64 {
+            return Err(CoreError::InvalidLaunchOption(
+                "too many environment variables (64 maximum)".to_string(),
+            ));
+        }
+
+        self.db.upsert_game_launch_config(&GameLaunchConfig {
+            profile_id: profile.id,
+            game_id,
+            wine_prefix: prefix,
+            launch_args: args,
+            env_vars: clean_vars,
+        })?;
+        Ok(())
+    }
+
     /// Lists all pending offline save syncs queued for the active profile.
     pub async fn list_pending_syncs(&self) -> CoreResult<Vec<PendingSync>> {
         let profile = self
@@ -2742,7 +2890,32 @@ impl LauncherCore {
             .get_installed_game(&profile.id, game_id)?
             .ok_or(CoreError::GameNotInstalled(game_id))?;
 
+        let launch_config = self
+            .db
+            .get_game_launch_config(&profile.id, game_id)?
+            .unwrap_or_default();
         options.prefixes_root = self.paths.prefixes_dir.clone();
+        if options.prefix_override.is_none() {
+            options.prefix_override = launch_config.wine_prefix.as_deref().map(PathBuf::from);
+        }
+        // Callers (e.g. tests or embedded use) may have supplied their own arguments; the
+        // saved per-game configuration is appended after them so it always takes effect.
+        options.extra_args.extend(
+            launch_config
+                .launch_args
+                .as_deref()
+                .map(parse_launch_args)
+                .unwrap_or_default(),
+        );
+        options.extra_env.extend(
+            launch_config
+                .env_vars
+                .iter()
+                .map(|var| (var.key.clone(), var.value.clone())),
+        );
+        if options.log_path.is_none() {
+            options.log_path = Some(self.game_log_path(game_id));
+        }
         let proton_list = self.detect_proton();
         let chosen_proton = installed
             .proton_override

@@ -1779,6 +1779,55 @@ textarea.input {
   color: var(--fg);
 }
 
+/* Per-game launch options (prefix, arguments, environment) */
+.launch-path-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launch-path-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.launch-path-row .btn {
+  flex: 0 0 auto;
+  height: 38px;
+}
+
+.env-var-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.env-var-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.env-var-row .input {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.env-var-add {
+  align-self: flex-start;
+}
+
+.launch-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
 /* ---------- Download manager ---------- */
 
 .page-header-row {
@@ -2375,6 +2424,59 @@ textarea.input {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+
+.modal-card-wide {
+  max-width: 720px;
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.game-log-section {
+  margin-top: 18px;
+  text-align: left;
+}
+
+.game-log-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.game-log-section-head h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.game-log-tools {
+  display: flex;
+  gap: 6px;
+}
+
+.game-log-output {
+  margin: 0 0 8px;
+  padding: 14px 16px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: var(--tile);
+  border: 1px solid var(--hairline);
+  background: var(--canvas);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.game-log-output.is-empty {
+  color: var(--muted);
 }
 
 .lightbox-frame {
