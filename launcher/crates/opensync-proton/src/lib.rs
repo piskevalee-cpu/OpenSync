@@ -1,7 +1,7 @@
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
+use ring::digest::{Context as DigestContext, SHA512};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha512};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use tar::Archive;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use walkdir::WalkDir;
 
 #[derive(Debug, Error)]
 pub enum ProtonError {
@@ -128,9 +127,7 @@ pub fn macos_app_inner_binary(app_path: &Path) -> Option<PathBuf> {
             .unwrap_or("")
             .to_lowercase();
         let name_match = if !bundle_name.is_empty()
-            && (stem == bundle_name
-                || stem.contains(&bundle_name)
-                || bundle_name.contains(&stem))
+            && (stem == bundle_name || stem.contains(&bundle_name) || bundle_name.contains(&stem))
         {
             0
         } else {
@@ -150,6 +147,10 @@ pub fn detect_binary_kind(path: &Path) -> BinaryKind {
     let Ok(mut f) = File::open(path) else {
         return BinaryKind::Unknown;
     };
+    detect_binary_kind_from_file(&mut f)
+}
+
+fn detect_binary_kind_from_file(f: &mut File) -> BinaryKind {
     let mut magic = [0u8; 8];
     let Ok(n) = f.read(&mut magic) else {
         return BinaryKind::Unknown;
@@ -197,101 +198,253 @@ const IGNORED_EXE_SUBSTRINGS: &[&str] = &[
     "dotnetfx",
 ];
 
+#[inline]
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+#[inline]
+fn has_ignored_exe_substring(s: &str) -> bool {
+    IGNORED_EXE_SUBSTRINGS
+        .iter()
+        .any(|bad| contains_ascii_ci(s, bad))
+}
+
+#[inline]
+fn is_non_executable_file_name(name: &str) -> bool {
+    if contains_ascii_ci(name, ".so.") {
+        return true;
+    }
+    let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "dat"
+            | "pak"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "gif"
+            | "bmp"
+            | "tga"
+            | "dds"
+            | "ogg"
+            | "wav"
+            | "mp3"
+            | "flac"
+            | "mp4"
+            | "webm"
+            | "mkv"
+            | "avi"
+            | "txt"
+            | "md"
+            | "json"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "log"
+            | "csv"
+            | "sav"
+            | "bak"
+            | "tmp"
+            | "part"
+            | "zip"
+            | "tar"
+            | "gz"
+            | "7z"
+            | "rar"
+            | "ttf"
+            | "otf"
+            | "woff"
+            | "woff2"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "pdb"
+            | "assets"
+            | "ress"
+            | "resource"
+            | "bank"
+            | "fsb"
+            | "bik"
+            | "bk2"
+            | "usm"
+            | "pck"
+            | "wad"
+            | "vpk"
+            | "bsa"
+            | "ba2"
+            | "esm"
+            | "esp"
+            | "ico"
+            | "icns"
+            | "pdf"
+            | "html"
+            | "css"
+            | "map"
+            | "shader"
+            | "glsl"
+            | "hlsl"
+            | "spv"
+            | "obj"
+            | "mtl"
+            | "fbx"
+            | "glb"
+            | "gltf"
+            | "cur"
+            | "ani"
+            | "lib"
+            | "a"
+            | "o"
+    )
+}
+
 /// Automatically discovers and ranks launchable executables inside an installed game directory.
 pub fn discover_executables(install_dir: &Path, game_name: &str) -> Vec<DiscoveredExecutable> {
-    let lower_game = game_name
-        .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric(), "");
+    let lower_game: String = game_name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
 
     let mut candidates = Vec::new();
-    for entry in WalkDir::new(install_dir)
-        .max_depth(4)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        let abs = entry.path().to_path_buf();
-        let Ok(rel) = abs.strip_prefix(install_dir) else {
+    let mut stack = vec![(install_dir.to_path_buf(), String::new(), 0usize)];
+
+    while let Some((dir, prefix, depth)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        let lower_rel = rel_str.to_lowercase();
-        if IGNORED_EXE_SUBSTRINGS.iter().any(|bad| lower_rel.contains(bad)) {
-            continue;
-        }
+        let child_depth = depth + 1;
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let file_name_os = entry.file_name();
+            let Some(name) = file_name_os.to_str() else {
+                continue;
+            };
+            if has_ignored_exe_substring(name) {
+                continue;
+            }
 
-        // Skip shared libraries and macOS bundles' internal support files.
-        if lower_rel.ends_with(".dll")
-            || lower_rel.ends_with(".so")
-            || lower_rel.contains(".so.")
-            || lower_rel.ends_with(".dylib")
-            || lower_rel.ends_with(".framework")
-            || lower_rel.contains(".app/contents/")
-        {
-            continue;
-        }
+            if ft.is_dir() {
+                // Skip macOS frameworks and never descend inside `.app` bundles.
+                if (name.len() >= 10
+                    && name.as_bytes()[name.len() - 10..].eq_ignore_ascii_case(b".framework"))
+                    || (name.eq_ignore_ascii_case("contents")
+                        && prefix.len() >= 4
+                        && prefix.as_bytes()[prefix.len() - 4..].eq_ignore_ascii_case(b".app"))
+                {
+                    continue;
+                }
+                let abs = entry.path();
+                let rel_str = if prefix.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                if name.len() >= 4
+                    && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".app")
+                    && abs.join("Contents/MacOS").is_dir()
+                {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    candidates.push(DiscoveredExecutable {
+                        rel_path: rel_str,
+                        abs_path: abs,
+                        kind: BinaryKind::MacOsAppBundle,
+                        size,
+                    });
+                    continue;
+                }
+                if child_depth < 4 {
+                    stack.push((abs, rel_str, child_depth));
+                }
+                continue;
+            }
 
-        let is_bundle = is_macos_app_bundle(&abs);
-        if !is_bundle && !entry.file_type().is_file() {
-            continue;
-        }
+            if !ft.is_file() || is_non_executable_file_name(name) {
+                continue;
+            }
 
-        let kind = detect_binary_kind(&abs);
-        if kind == BinaryKind::Unknown {
-            continue;
+            let abs = entry.path();
+            let Ok(mut f) = File::open(&abs) else {
+                continue;
+            };
+            let kind = detect_binary_kind_from_file(&mut f);
+            if kind == BinaryKind::Unknown {
+                continue;
+            }
+            let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+            let rel_str = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            candidates.push(DiscoveredExecutable {
+                rel_path: rel_str,
+                abs_path: abs,
+                kind,
+                size,
+            });
         }
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        candidates.push(DiscoveredExecutable {
-            rel_path: rel_str,
-            abs_path: abs,
-            kind,
-            size,
-        });
     }
 
-    candidates.sort_by(|a, b| {
-        let score = |c: &DiscoveredExecutable| -> (u8, u8, usize, u64) {
-            let depth = c.rel_path.matches('/').count();
-            let stem = Path::new(&c.rel_path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase()
-                .replace(|ch: char| !ch.is_alphanumeric(), "");
-            let name_match = if !lower_game.is_empty()
-                && (stem.contains(&lower_game) || lower_game.contains(&stem))
-            {
-                0
-            } else {
-                1
-            };
-            #[cfg(target_os = "windows")]
-            let kind_rank = match c.kind {
-                BinaryKind::MacOsAppBundle | BinaryKind::MacOsMachO => 2,
-                BinaryKind::WindowsPe => 0,
-                BinaryKind::LinuxElf => 1,
-                BinaryKind::ShellScript => 3,
-                BinaryKind::Unknown => 4,
-            };
-            #[cfg(target_os = "macos")]
-            let kind_rank = match c.kind {
-                BinaryKind::MacOsAppBundle => 0,
-                BinaryKind::MacOsMachO => 1,
-                BinaryKind::ShellScript => 2,
-                BinaryKind::WindowsPe => 3,
-                BinaryKind::LinuxElf => 4,
-                BinaryKind::Unknown => 5,
-            };
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            let kind_rank = match c.kind {
-                BinaryKind::LinuxElf => 0,
-                BinaryKind::WindowsPe | BinaryKind::MacOsMachO | BinaryKind::MacOsAppBundle => 1,
-                BinaryKind::ShellScript => 2,
-                BinaryKind::Unknown => 3,
-            };
-            (name_match, kind_rank, depth, u64::MAX - c.size)
+    candidates.sort_by_cached_key(|c| {
+        let depth = c.rel_path.matches('/').count();
+        let stem: String = Path::new(&c.rel_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let name_match: u8 = if !lower_game.is_empty()
+            && (stem.contains(&lower_game) || lower_game.contains(&stem))
+        {
+            0
+        } else {
+            1
         };
-        score(a).cmp(&score(b))
+        #[cfg(target_os = "windows")]
+        let kind_rank: u8 = match c.kind {
+            BinaryKind::MacOsAppBundle | BinaryKind::MacOsMachO => 2,
+            BinaryKind::WindowsPe => 0,
+            BinaryKind::LinuxElf => 1,
+            BinaryKind::ShellScript => 3,
+            BinaryKind::Unknown => 4,
+        };
+        #[cfg(target_os = "macos")]
+        let kind_rank: u8 = match c.kind {
+            BinaryKind::MacOsAppBundle => 0,
+            BinaryKind::MacOsMachO => 1,
+            BinaryKind::ShellScript => 2,
+            BinaryKind::WindowsPe => 3,
+            BinaryKind::LinuxElf => 4,
+            BinaryKind::Unknown => 5,
+        };
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let kind_rank: u8 = match c.kind {
+            BinaryKind::LinuxElf => 0,
+            BinaryKind::WindowsPe | BinaryKind::MacOsMachO | BinaryKind::MacOsAppBundle => 1,
+            BinaryKind::ShellScript => 2,
+            BinaryKind::Unknown => 3,
+        };
+        (name_match, kind_rank, depth, u64::MAX - c.size)
     });
 
     candidates
@@ -390,8 +543,11 @@ pub fn detect_proton_in_roots(roots: &[(PathBuf, ProtonSource)]) -> Vec<ProtonIn
             continue;
         };
         for entry in entries.filter_map(Result::ok) {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             let dir = entry.path();
-            if !dir.is_dir() {
+            if !ft.is_dir() && !(ft.is_symlink() && dir.is_dir()) {
                 continue;
             }
             let proton_script = dir.join("proton");
@@ -433,7 +589,7 @@ pub fn detect_proton_in_roots(roots: &[(PathBuf, ProtonSource)]) -> Vec<ProtonIn
     found
 }
 
-/// Builds a native launch specification, marking the file executable on Unix.
+/// Builds a native launch specification, marking known executable files executable on Unix.
 fn native_command(
     exe: &DiscoveredExecutable,
     extra_args: &[String],
@@ -442,13 +598,15 @@ fn native_command(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(&exe.abs_path) {
+        // Never mutate permissions of an unclassified file — it may be user data that only
+        // happens to be the last discovery candidate.
+        if exe.kind != BinaryKind::Unknown
+            && let Ok(meta) = fs::metadata(&exe.abs_path)
+        {
             let mode = meta.permissions().mode();
             if mode & 0o111 == 0 {
-                let _ = fs::set_permissions(
-                    &exe.abs_path,
-                    fs::Permissions::from_mode(mode | 0o755),
-                );
+                let _ =
+                    fs::set_permissions(&exe.abs_path, fs::Permissions::from_mode(mode | 0o755));
             }
         }
     }
@@ -471,7 +629,10 @@ fn macos_app_command(
 ) -> ProtonResult<LaunchCommandSpec> {
     let open = PathBuf::from("/usr/bin/open");
     if open.is_file() {
-        let mut args = vec!["-W".to_string(), exe.abs_path.to_string_lossy().into_owned()];
+        let mut args = vec![
+            "-W".to_string(),
+            exe.abs_path.to_string_lossy().into_owned(),
+        ];
         if !extra_args.is_empty() {
             args.push("--args".to_string());
             args.extend(extra_args.iter().cloned());
@@ -562,14 +723,43 @@ fn macos_pe_command(
         });
     };
 
+    let label = format!("{runner_label} (macOS)");
     let mut args = vec![exe.abs_path.to_string_lossy().into_owned()];
     args.extend(extra_args.iter().cloned());
+
+    // Whisky/CrossOver are distributed as .app bundles; a directory cannot be executed directly.
+    if is_macos_app_bundle(&runner) {
+        if let Some(inner) = macos_app_inner_binary(&runner) {
+            return Ok(LaunchCommandSpec {
+                program: inner,
+                args,
+                env: Vec::new(),
+                working_dir,
+                runtime_label: label,
+            });
+        }
+        let mut open_args = vec![
+            "-W".to_string(),
+            "-a".to_string(),
+            runner.to_string_lossy().into_owned(),
+            "--args".to_string(),
+        ];
+        open_args.extend(args);
+        return Ok(LaunchCommandSpec {
+            program: PathBuf::from("/usr/bin/open"),
+            args: open_args,
+            env: Vec::new(),
+            working_dir,
+            runtime_label: label,
+        });
+    }
+
     Ok(LaunchCommandSpec {
         program: runner,
         args,
         env: Vec::new(),
         working_dir,
-        runtime_label: format!("{runner_label} (macOS)"),
+        runtime_label: label,
     })
 }
 
@@ -618,7 +808,10 @@ fn build_proton_pe_command(
         });
     }
 
-    let mut args = vec!["run".to_string(), exe.abs_path.to_string_lossy().to_string()];
+    let mut args = vec![
+        "run".to_string(),
+        exe.abs_path.to_string_lossy().to_string(),
+    ];
     args.extend(extra_args.iter().cloned());
     env.push(("STEAM_COMPAT_APP_ID".to_string(), "0".to_string()));
     Ok(LaunchCommandSpec {
@@ -791,7 +984,7 @@ pub fn install_ge_proton_archive(
 ) -> ProtonResult<ProtonInstallation> {
     if let Some(expected) = expected_sha512 {
         let mut f = File::open(tarball_path)?;
-        let mut hasher = Sha512::new();
+        let mut hasher = DigestContext::new(&SHA512);
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = f.read(&mut buf)?;
@@ -800,7 +993,7 @@ pub fn install_ge_proton_archive(
             }
             hasher.update(&buf[..n]);
         }
-        let actual = hex::encode(hasher.finalize());
+        let actual = hex::encode(hasher.finish().as_ref());
         let clean_expected = expected
             .split_whitespace()
             .next()
@@ -1004,7 +1197,15 @@ where
     on_verifying();
 
     let expected_sha512 = match sha512_url {
-        Some(url) => Some(client.get(url).send().await?.error_for_status()?.text().await?),
+        Some(url) => Some(
+            client
+                .get(url)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?,
+        ),
         None => None,
     };
 
@@ -1022,7 +1223,11 @@ where
         )
     })
     .await
-    .map_err(|e| ProtonError::Io(std::io::Error::other(format!("proton installer panicked: {e}"))))??;
+    .map_err(|e| {
+        ProtonError::Io(std::io::Error::other(format!(
+            "proton installer panicked: {e}"
+        )))
+    })??;
 
     Ok(installation)
 }
@@ -1074,7 +1279,11 @@ mod tests {
         let spawn = dir.path().join("flatpak-spawn");
         fs::write(&spawn, b"#!/bin/sh\n").expect("write fake flatpak-spawn");
         let old_path = std::env::var_os("PATH");
-        let new_path = format!("{}:{}", dir.path().display(), old_path.clone().unwrap_or_default().to_string_lossy());
+        let new_path = format!(
+            "{}:{}",
+            dir.path().display(),
+            old_path.clone().unwrap_or_default().to_string_lossy()
+        );
         unsafe {
             std::env::set_var("FLATPAK_ID", "io.opensync.launcher");
             std::env::set_var("PATH", &new_path);
@@ -1119,5 +1328,21 @@ mod tests {
         assert_eq!(spec.program, path);
         assert_eq!(spec.args, ["--fullscreen".to_string()]);
         assert_eq!(spec.runtime_label, "native");
+    }
+
+    #[test]
+    fn discovery_handles_multibyte_utf8_directory_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Names whose byte offsets would land mid-codepoint if sliced by raw byte count.
+        for name in ["Pokémon.framework", "Über.app", "ゲーム.app", "C++/redist"] {
+            let path = dir.path().join(name);
+            if name.contains('/') {
+                std::fs::create_dir_all(&path).expect("create nested dir");
+            } else {
+                std::fs::create_dir(&path).expect("create dir");
+            }
+        }
+        // Must not panic on any of the above.
+        let _ = discover_executables(dir.path(), "Über");
     }
 }

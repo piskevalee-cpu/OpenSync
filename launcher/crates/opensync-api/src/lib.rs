@@ -199,6 +199,7 @@ pub struct OpenSyncClient {
     base_url: String,
     http: Client,
     cookie: Option<String>,
+    cookie_header: Option<HeaderValue>,
 }
 
 /// Normalizes a user-supplied OpenSync server URL:
@@ -294,10 +295,15 @@ impl OpenSyncClient {
             .connect_timeout(Duration::from_secs(8))
             .build()?;
 
+        let cookie_header = cookie
+            .as_deref()
+            .and_then(|c| HeaderValue::from_str(c).ok());
+
         Ok(Self {
             base_url: normalized,
             http,
             cookie,
+            cookie_header,
         })
     }
 
@@ -310,10 +316,14 @@ impl OpenSyncClient {
     }
 
     pub fn with_cookie(&self, cookie: Option<String>) -> Self {
+        let cookie_header = cookie
+            .as_deref()
+            .and_then(|c| HeaderValue::from_str(c).ok());
         Self {
             base_url: self.base_url.clone(),
             http: self.http.clone(),
             cookie,
+            cookie_header,
         }
     }
 
@@ -323,10 +333,8 @@ impl OpenSyncClient {
 
     fn auth_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(cookie) = &self.cookie
-            && let Ok(val) = HeaderValue::from_str(cookie)
-        {
-            headers.insert(COOKIE, val);
+        if let Some(val) = &self.cookie_header {
+            headers.insert(COOKIE, val.clone());
         }
         headers
     }
@@ -596,6 +604,7 @@ impl OpenSyncClient {
         chunk: Bytes,
     ) -> ApiResult<()> {
         let mut headers = self.auth_headers();
+        let mut num_buf = itoa::Buffer::new();
         headers.insert(
             "x-path",
             HeaderValue::from_str(&urlencoding::encode(rel_path))
@@ -603,15 +612,15 @@ impl OpenSyncClient {
         );
         headers.insert(
             "x-index",
-            HeaderValue::from_str(&index.to_string()).unwrap(),
+            HeaderValue::from_bytes(num_buf.format(index).as_bytes()).unwrap(),
         );
         headers.insert(
             "x-total",
-            HeaderValue::from_str(&total.to_string()).unwrap(),
+            HeaderValue::from_bytes(num_buf.format(total).as_bytes()).unwrap(),
         );
         headers.insert(
             "x-size",
-            HeaderValue::from_str(&declared_size.to_string()).unwrap(),
+            HeaderValue::from_bytes(num_buf.format(declared_size).as_bytes()).unwrap(),
         );
         headers.insert(
             "x-hash",
@@ -752,6 +761,7 @@ impl OpenSyncClient {
         chunk: Bytes,
     ) -> ApiResult<ChunkAck> {
         let mut headers = self.auth_headers();
+        let mut num_buf = itoa::Buffer::new();
         headers.insert(
             "x-path",
             HeaderValue::from_str(&urlencoding::encode(rel_path))
@@ -759,15 +769,15 @@ impl OpenSyncClient {
         );
         headers.insert(
             "x-index",
-            HeaderValue::from_str(&index.to_string()).unwrap(),
+            HeaderValue::from_bytes(num_buf.format(index).as_bytes()).unwrap(),
         );
         headers.insert(
             "x-total",
-            HeaderValue::from_str(&total.to_string()).unwrap(),
+            HeaderValue::from_bytes(num_buf.format(total).as_bytes()).unwrap(),
         );
         headers.insert(
             "x-size",
-            HeaderValue::from_str(&declared_size.to_string()).unwrap(),
+            HeaderValue::from_bytes(num_buf.format(declared_size).as_bytes()).unwrap(),
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
 

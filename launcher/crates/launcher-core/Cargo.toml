@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+futures-util.workspace = true
 launcher-db = { path = "../launcher-db" }
 opensync-api = { path = "../opensync-api" }
 opensync-proton = { path = "../opensync-proton" }

@@ -8,10 +8,10 @@ use opensync_proton::{
 use opensync_sync::{SyncReport, sync_game_saves};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::time::{Duration, Instant};
-use thiserror::Error;
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
+use std::time::{Duration, Instant};
+use thiserror::Error;
 use tokio::process::Command;
 
 /// On macOS, holds a `caffeinate` assertion for the live game process so the machine does
@@ -133,13 +133,28 @@ impl SessionClock {
         // keeps advancing. The gap is therefore excluded from active screen time on both
         // platforms. Even if monotonic kept ticking (e.g. CLOCK_BOOTTIME / VM pause), cap
         // huge single gaps beyond suspend_threshold.
-        let skew = wall_delta.abs_diff(mono_delta);
-        if skew <= self.suspend_threshold && mono_delta <= self.suspend_threshold {
-            self.active_duration += mono_delta;
-        } else if wall_delta <= self.suspend_threshold && mono_delta <= self.suspend_threshold {
-            self.active_duration += mono_delta;
-        }
-        // Otherwise treat the jump as a suspend/sleep gap and do not add it.
+        // On Unix (Linux CLOCK_MONOTONIC, macOS mach_absolute_time) the monotonic clock pauses
+        // during sleep, so `mono_delta` already excludes suspend time. Keep only that portion
+        // when wall time jumped ahead, and trust the smaller delta if the wall clock went back.
+        #[cfg(unix)]
+        let active = if wall_delta > mono_delta.saturating_add(self.suspend_threshold) {
+            mono_delta
+        } else {
+            mono_delta.min(wall_delta)
+        };
+
+        // On Windows (and other non-Unix targets) `Instant` keeps ticking through sleep, so a
+        // long delta is indistinguishable from real playtime. Stay conservative and cap each
+        // heartbeat at the suspend threshold rather than counting a whole sleep interval.
+        #[cfg(not(unix))]
+        let active = if mono_delta <= self.suspend_threshold
+            && wall_delta <= mono_delta.saturating_add(self.suspend_threshold)
+        {
+            mono_delta
+        } else {
+            Duration::ZERO
+        };
+        self.active_duration += active;
 
         self.last_wall = now_wall;
         self.last_mono = mono_elapsed;

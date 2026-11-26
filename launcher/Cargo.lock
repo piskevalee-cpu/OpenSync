@@ -1940,6 +1940,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "flate2",
+ "futures-util",
  "hex",
  "launcher-db",
  "opensync-api",
@@ -1965,6 +1966,7 @@ name = "launcher-db"
 version = "0.4.1"
 dependencies = [
  "chrono",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2501,6 +2503,7 @@ name = "opensync-api"
 version = "0.4.1"
 dependencies = [
  "bytes",
+ "itoa",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2518,13 +2521,12 @@ dependencies = [
  "futures-util",
  "hex",
  "reqwest 0.12.28",
+ "ring",
  "serde",
- "sha2 0.10.9",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "walkdir",
 ]
 
 [[package]]
@@ -2554,12 +2556,12 @@ dependencies = [
  "hex",
  "opensync-api",
  "rayon",
+ "ring",
  "serde",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "walkdir",
 ]
 
 [[package]]
@@ -2571,8 +2573,9 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
+ "memchr",
  "opensync-api",
- "rayon",
+ "ring",
  "serde",
  "sha2 0.10.9",
  "tempfile",

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use futures_util::stream::{self, StreamExt};
 use launcher_db::{
     ActiveSessionRecord, ActivityLogEntry, DbError, InstalledGame, LauncherDb, PendingSync,
     PlaytimeSummary, Profile, SecretStore,
@@ -11,7 +12,10 @@ use opensync_proton::{
 use opensync_runner::{
     LaunchOptions, PostExitSyncStatus, RunnerError, SessionOutcome, launch_and_track_with_hook,
 };
-use opensync_sync::{SyncError, SyncReport, inspect_unsynced_saves, sync_game_saves};
+use opensync_sync::{
+    DirFingerprint, SyncError, SyncReport, compute_dir_fingerprint, inspect_unsynced_saves,
+    sync_game_saves, sync_game_saves_with_fingerprint,
+};
 use opensync_transfer::{
     DownloadControl, DownloadOutcome, SpeedSample, TransferError, UploadControl, UploadOutcome,
     download_and_extract_game, manifest_fingerprint, safe_rel_path, upload_folder,
@@ -383,52 +387,6 @@ impl Drop for SyncActivityGuard {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct DirFingerprint {
-    file_count: usize,
-    total_bytes: u64,
-    max_mtime_nanos: u128,
-}
-
-fn compute_dir_fingerprint(root: &Path) -> io::Result<DirFingerprint> {
-    if !root.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("directory does not exist: {}", root.display()),
-        ));
-    }
-    let mut fp = DirFingerprint::default();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let ft = entry.file_type()?;
-            if ft.is_symlink() {
-                continue;
-            }
-            if ft.is_dir() {
-                stack.push(entry.path());
-                continue;
-            }
-            if !ft.is_file() {
-                continue;
-            }
-            if entry.file_name().to_string_lossy().ends_with(".part") {
-                continue;
-            }
-            let meta = entry.metadata()?;
-            fp.file_count += 1;
-            fp.total_bytes = fp.total_bytes.saturating_add(meta.len());
-            if let Ok(mtime) = meta.modified()
-                && let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH)
-            {
-                fp.max_mtime_nanos = fp.max_mtime_nanos.max(dur.as_nanos());
-            }
-        }
-    }
-    Ok(fp)
-}
-
 pub struct LauncherCore {
     db: LauncherDb,
     secrets: Arc<dyn SecretStore>,
@@ -563,7 +521,12 @@ impl LauncherCore {
             .lock()
             .unwrap()
             .insert((profile_id.to_string(), game_id));
-        if self.db.get_active_session(profile_id, game_id).ok().flatten().is_none()
+        if self
+            .db
+            .get_active_session(profile_id, game_id)
+            .ok()
+            .flatten()
+            .is_none()
             && let Ok(Some(inst)) = self.db.get_installed_game(profile_id, game_id)
         {
             let now = Utc::now();
@@ -1113,9 +1076,7 @@ impl LauncherCore {
         let base = format!("{}_{}", profile.id, game_id);
         let mime_path = covers_dir.join(format!("{base}.mime"));
 
-        if mime_path.is_file()
-            && let Ok(ct_raw) = std::fs::read_to_string(&mime_path)
-        {
+        if let Ok(ct_raw) = std::fs::read_to_string(&mime_path) {
             let ct = ct_raw.trim().to_ascii_lowercase();
             let data_path = covers_dir.join(format!("{base}.{}", ext_for_mime(&ct)));
             if let Ok(bytes) = std::fs::read(&data_path)
@@ -1169,15 +1130,9 @@ impl LauncherCore {
             None => install_dir_for_slug(&games_dir, &profile.id, &detail.game.slug)?,
         };
 
-        let outcome = download_and_extract_game(
-            &client,
-            game_id,
-            &install_dir,
-            fresh,
-            verify_clean,
-            control,
-        )
-        .await?;
+        let outcome =
+            download_and_extract_game(&client, game_id, &install_dir, fresh, verify_clean, control)
+                .await?;
 
         let installed = self.record_installed_game(
             &profile.id,
@@ -1447,7 +1402,9 @@ impl LauncherCore {
             }
             let telemetry = Arc::new(Mutex::new(TelemetryState {
                 last_sample_at: started,
-                last_emit_at: started.checked_sub(Duration::from_secs(1)).unwrap_or(started),
+                last_emit_at: started
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap_or(started),
                 last_sample_bytes: 0,
             }));
 
@@ -1733,12 +1690,9 @@ impl LauncherCore {
             bytes_per_sec: 0.0,
             speed_samples: Vec::new(),
         };
-        let staging_root = folder.is_none().then(|| {
-            self.paths
-                .cache_dir
-                .join("uploads")
-                .join(&job_id)
-        });
+        let staging_root = folder
+            .is_none()
+            .then(|| self.paths.cache_dir.join("uploads").join(&job_id));
         if let Some(root) = &staging_root {
             std::fs::create_dir_all(root.join("files"))?;
         }
@@ -1783,7 +1737,9 @@ impl LauncherCore {
     ) -> CoreResult<bool> {
         let safe = safe_rel_path(rel_path)?;
         if total == 0 {
-            return Err(CoreError::Io(io::Error::other("total must be greater than zero")));
+            return Err(CoreError::Io(io::Error::other(
+                "total must be greater than zero",
+            )));
         }
         let (root, offsets, control) = {
             let map = self.uploads.read().unwrap();
@@ -1794,7 +1750,11 @@ impl LauncherCore {
                 .staging_root
                 .clone()
                 .ok_or_else(|| CoreError::UploadNotFound(job_id.to_string()))?;
-            (root, Arc::clone(&entry.staged_offsets), entry.control.clone())
+            (
+                root,
+                Arc::clone(&entry.staged_offsets),
+                entry.control.clone(),
+            )
         };
         let mut offsets = offsets.lock().unwrap();
         // The per-file byte count tracked in the entry is the source of truth: JS chunkers use
@@ -2023,8 +1983,8 @@ impl LauncherCore {
             }
 
             if let Some(cleanup_root) = cleanup_root {
-                let _ =
-                    tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&cleanup_root)).await;
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&cleanup_root))
+                    .await;
             }
         });
     }
@@ -2049,10 +2009,7 @@ impl LauncherCore {
             }
             match client.get_game_status(game_id).await {
                 Ok(status) if status.status == "ready" => break,
-                Ok(status)
-                    if status.status.contains("fail")
-                        || status.status.contains("error") =>
-                {
+                Ok(status) if status.status.contains("fail") || status.status.contains("error") => {
                     return Err(CoreError::Api(ApiError::Http {
                         status: 500,
                         message: format!("game processing failed: {}", status.status),
@@ -2202,7 +2159,10 @@ impl LauncherCore {
             };
             if !matches!(
                 entry.snapshot.status,
-                UploadStatus::Queued | UploadStatus::Uploading | UploadStatus::Paused | UploadStatus::Indexing
+                UploadStatus::Queued
+                    | UploadStatus::Uploading
+                    | UploadStatus::Paused
+                    | UploadStatus::Indexing
             ) {
                 return false;
             }
@@ -2498,20 +2458,22 @@ impl LauncherCore {
             trigger: "manual".to_string(),
         });
 
-        match sync_game_saves(&client, game_id, &installed.install_dir, force_mass_deletion).await {
-            Ok(report) => {
+        match sync_game_saves_with_fingerprint(
+            &client,
+            game_id,
+            &installed.install_dir,
+            force_mass_deletion,
+        )
+        .await
+        {
+            Ok((report, post_fp)) => {
                 self.db
                     .update_game_synced_at(&profile.id, game_id, Utc::now())?;
                 self.db.clear_pending_sync(&profile.id, game_id)?;
-                let dir_for_fp = installed.install_dir.clone();
-                if let Ok(Ok(post_fp)) =
-                    tokio::task::spawn_blocking(move || compute_dir_fingerprint(&dir_for_fp)).await
-                {
-                    self.sync_fingerprints
-                        .lock()
-                        .unwrap()
-                        .insert((profile.id.clone(), game_id), post_fp);
-                }
+                self.sync_fingerprints
+                    .lock()
+                    .unwrap()
+                    .insert((profile.id.clone(), game_id), post_fp);
                 let detail = format_sync_report_detail(&report);
                 let _ = self.record_activity(
                     &profile.id,
@@ -2561,13 +2523,22 @@ impl LauncherCore {
             }
             if let Some(installed) = self.db.get_installed_game(&profile.id, item.game_id)? {
                 let _sync_guard = self.begin_sync_activity();
-                if let Ok(report) =
-                    sync_game_saves(&client, item.game_id, &installed.install_dir, false).await
+                if let Ok((report, post_fp)) = sync_game_saves_with_fingerprint(
+                    &client,
+                    item.game_id,
+                    &installed.install_dir,
+                    false,
+                )
+                .await
                 {
-                    let _ =
-                        self.db
-                            .update_game_synced_at(&profile.id, item.game_id, Utc::now());
+                    let _ = self
+                        .db
+                        .update_game_synced_at(&profile.id, item.game_id, Utc::now());
                     let _ = self.db.clear_pending_sync(&profile.id, item.game_id);
+                    self.sync_fingerprints
+                        .lock()
+                        .unwrap()
+                        .insert((profile.id.clone(), item.game_id), post_fp);
                     let _ = self.record_activity(
                         &profile.id,
                         Some(item.game_id),
@@ -2607,77 +2578,115 @@ impl LauncherCore {
             return Ok(BackgroundSyncOutcome::default());
         }
 
-        let flushed_pending = self.flush_pending_syncs().await.unwrap_or(0);
+        let flushed_pending = if pending.is_empty() {
+            0
+        } else {
+            self.flush_pending_syncs().await.unwrap_or(0)
+        };
         let pending_before_flush: HashSet<i64> = pending.into_iter().map(|p| p.game_id).collect();
-        let pending_after_flush: HashSet<i64> = self
+        let pending_after_flush: HashSet<i64> = if pending_before_flush.is_empty() {
+            HashSet::new()
+        } else {
+            self.db
+                .list_pending_syncs(&profile.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| p.game_id)
+                .collect()
+        };
+        let installed = self
             .db
-            .list_pending_syncs(&profile.id)
-            .unwrap_or_default()
+            .list_installed_games(&profile.id)
+            .unwrap_or_default();
+        let uninstalling_snapshot: HashSet<(String, i64)> = self
+            .uninstalling_games
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let targets: Vec<_> = installed
             .into_iter()
-            .map(|p| p.game_id)
+            .filter(|game| {
+                !self.is_game_playing(&profile.id, game.game_id)
+                    && !uninstalling_snapshot.contains(&(profile.id.clone(), game.game_id))
+            })
             .collect();
-        let mut synced_games = 0usize;
-        let installed = self.db.list_installed_games(&profile.id).unwrap_or_default();
-        for game in installed {
-            if self.is_shutting_down() {
-                break;
-            }
-            if self.is_game_playing(&profile.id, game.game_id)
-                || self
-                    .uninstalling_games
-                    .lock()
-                    .map(|g| g.contains(&(profile.id.clone(), game.game_id)))
-                    .unwrap_or(false)
-            {
-                continue;
-            }
 
-            let is_pending = pending_before_flush.contains(&game.game_id)
-                || pending_after_flush.contains(&game.game_id);
-            let fp_key = (profile.id.clone(), game.game_id);
-            if !is_pending {
-                let dir_for_fp = game.install_dir.clone();
-                let pre_fp =
-                    tokio::task::spawn_blocking(move || compute_dir_fingerprint(&dir_for_fp))
-                        .await
-                        .ok()
-                        .and_then(Result::ok);
-                if let Some(fp) = pre_fp {
-                    let cached = self.sync_fingerprints.lock().unwrap().get(&fp_key).copied();
-                    if cached == Some(fp) {
-                        continue;
+        let synced_counts: Vec<usize> = stream::iter(targets)
+            .map(|game| {
+                let client = client.clone();
+                let profile_id = profile.id.clone();
+                let is_pending = pending_before_flush.contains(&game.game_id)
+                    || pending_after_flush.contains(&game.game_id);
+                async move {
+                    if self.is_shutting_down() {
+                        return 0;
+                    }
+                    // Targets were filtered before buffering; a game may have started or begun
+                    // uninstalling while queued. Re-check before touching its save folder.
+                    if self.is_game_playing(&profile_id, game.game_id)
+                        || self
+                            .uninstalling_games
+                            .lock()
+                            .map(|g| g.contains(&(profile_id.clone(), game.game_id)))
+                            .unwrap_or(false)
+                    {
+                        return 0;
+                    }
+                    let fp_key = (profile_id.clone(), game.game_id);
+                    if !is_pending {
+                        let cached = self.sync_fingerprints.lock().unwrap().get(&fp_key).copied();
+                        if let Some(cached_fp) = cached {
+                            let dir_for_fp = game.install_dir.clone();
+                            let pre_fp = tokio::task::spawn_blocking(move || {
+                                compute_dir_fingerprint(&dir_for_fp)
+                            })
+                            .await
+                            .ok()
+                            .and_then(Result::ok);
+                            if pre_fp == Some(cached_fp) {
+                                return 0;
+                            }
+                        }
+                    }
+
+                    let _sync_guard = self.begin_sync_activity();
+                    if let Ok((report, post_fp)) = sync_game_saves_with_fingerprint(
+                        &client,
+                        game.game_id,
+                        &game.install_dir,
+                        false,
+                    )
+                    .await
+                    {
+                        let _ =
+                            self.db
+                                .update_game_synced_at(&profile_id, game.game_id, Utc::now());
+                        let _ = self.db.clear_pending_sync(&profile_id, game.game_id);
+                        self.sync_fingerprints
+                            .lock()
+                            .unwrap()
+                            .insert(fp_key, post_fp);
+                        if report.uploaded_files > 0 || report.deleted_paths > 0 {
+                            let _ = self.record_activity(
+                                &profile_id,
+                                Some(game.game_id),
+                                Some(&game.name),
+                                "sync_complete",
+                                "accent",
+                                &format!("Background auto-synced {}", game.name),
+                                &format_sync_report_detail(&report),
+                            );
+                        }
+                        1
+                    } else {
+                        0
                     }
                 }
-            }
-
-            let _sync_guard = self.begin_sync_activity();
-            if let Ok(report) =
-                sync_game_saves(&client, game.game_id, &game.install_dir, false).await
-            {
-                let _ = self
-                    .db
-                    .update_game_synced_at(&profile.id, game.game_id, Utc::now());
-                let _ = self.db.clear_pending_sync(&profile.id, game.game_id);
-                let dir_for_fp = game.install_dir.clone();
-                if let Ok(Ok(post_fp)) =
-                    tokio::task::spawn_blocking(move || compute_dir_fingerprint(&dir_for_fp)).await
-                {
-                    self.sync_fingerprints.lock().unwrap().insert(fp_key, post_fp);
-                }
-                if report.uploaded_files > 0 || report.deleted_paths > 0 {
-                    let _ = self.record_activity(
-                        &profile.id,
-                        Some(game.game_id),
-                        Some(&game.name),
-                        "sync_complete",
-                        "accent",
-                        &format!("Background auto-synced {}", game.name),
-                        &format_sync_report_detail(&report),
-                    );
-                }
-                synced_games += 1;
-            }
-        }
+            })
+            .buffer_unordered(6)
+            .collect()
+            .await;
+        let synced_games: usize = synced_counts.into_iter().sum();
 
         let outcome = BackgroundSyncOutcome {
             synced_games,
@@ -2908,7 +2917,10 @@ impl LauncherCore {
         let (client, connected) = {
             let guard = self.active.read().await;
             match guard.as_ref() {
-                Some(a) => (Some(a.client.clone()), a.state == ConnectionState::Connected),
+                Some(a) => (
+                    Some(a.client.clone()),
+                    a.state == ConnectionState::Connected,
+                ),
                 None => (None, false),
             }
         };
@@ -2918,8 +2930,7 @@ impl LauncherCore {
             return Ok(Vec::new());
         }
 
-        let live_in_memory: HashSet<(String, i64)> =
-            self.playing_games.lock().unwrap().clone();
+        let live_in_memory: HashSet<(String, i64)> = self.playing_games.lock().unwrap().clone();
 
         let mut out = Vec::new();
         for rec in active_rows {
@@ -3093,8 +3104,13 @@ impl LauncherCore {
             trigger: "recovery".to_string(),
         });
 
-        let report =
-            sync_game_saves(&client, game_id, &installed.install_dir, force_mass_deletion).await?;
+        let report = sync_game_saves(
+            &client,
+            game_id,
+            &installed.install_dir,
+            force_mass_deletion,
+        )
+        .await?;
         self.db
             .update_game_synced_at(&profile.id, game_id, Utc::now())?;
         self.db.clear_pending_sync(&profile.id, game_id)?;
@@ -3171,7 +3187,9 @@ impl LauncherCore {
             .filter(|e| {
                 matches!(
                     e.snapshot.status,
-                    DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Verifying
+                    DownloadStatus::Queued
+                        | DownloadStatus::Downloading
+                        | DownloadStatus::Verifying
                 )
             })
             .count();
@@ -3271,10 +3289,11 @@ impl LauncherCore {
         let now = Utc::now();
         for (pid, gid) in &live_pairs {
             if let Ok(Some(rec)) = self.db.get_active_session(pid, *gid) {
-                let elapsed = (now - rec.started_at).num_seconds().max(0) as u64;
+                // Use the suspend-aware heartbeat value only. Raw wall-clock elapsed time
+                // would count time the machine spent asleep as playtime.
                 let _ = self
                     .db
-                    .heartbeat_active_session(pid, *gid, now, rec.active_secs.max(elapsed));
+                    .heartbeat_active_session(pid, *gid, now, rec.active_secs);
             }
         }
 
@@ -3620,7 +3639,10 @@ fn ext_for_mime(content_type: &str) -> &'static str {
 
 fn format_sync_report_detail(report: &SyncReport) -> String {
     if report.uploaded_files == 0 && report.deleted_paths == 0 {
-        return format!("Saves up to date ({} files verified)", report.skipped_unchanged);
+        return format!(
+            "Saves up to date ({} files verified)",
+            report.skipped_unchanged
+        );
     }
     let mut parts = Vec::new();
     if report.uploaded_files > 0 {
@@ -3743,7 +3765,9 @@ mod path_safety_tests {
 
         // Non-existent traversal tail under the profile dir must be rejected.
         let non_existent_escape = profile_dir.join("foo/../../escaped-new");
-        assert!(assert_install_dir_contained(&games_dir, "profile-1", &non_existent_escape).is_err());
+        assert!(
+            assert_install_dir_contained(&games_dir, "profile-1", &non_existent_escape).is_err()
+        );
 
         // Valid non-existent remembered dir (after uninstall/delete) is accepted.
         let nonexistent_valid = profile_dir.join("celeste");

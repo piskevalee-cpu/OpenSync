@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
+use parking_lot::{Mutex, RwLock};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -186,17 +187,16 @@ impl SecretStore for MemorySecretStore {
     fn set(&self, profile_id: &str, cookie: &str) -> DbResult<()> {
         self.inner
             .lock()
-            .unwrap()
             .insert(profile_id.to_string(), cookie.to_string());
         Ok(())
     }
 
     fn get(&self, profile_id: &str) -> DbResult<Option<String>> {
-        Ok(self.inner.lock().unwrap().get(profile_id).cloned())
+        Ok(self.inner.lock().get(profile_id).cloned())
     }
 
     fn delete(&self, profile_id: &str) -> DbResult<()> {
-        self.inner.lock().unwrap().remove(profile_id);
+        self.inner.lock().remove(profile_id);
         Ok(())
     }
 }
@@ -204,14 +204,14 @@ impl SecretStore for MemorySecretStore {
 /// File-backed secret store with 0600 permissions on Unix for standalone persistence across restarts.
 pub struct FileSecretStore {
     path: PathBuf,
-    cache: Mutex<Option<HashMap<String, String>>>,
+    cache: RwLock<Option<HashMap<String, String>>>,
 }
 
 impl FileSecretStore {
     pub fn new(path: impl Into<PathBuf>) -> Arc<Self> {
         Arc::new(Self {
             path: path.into(),
-            cache: Mutex::new(None),
+            cache: RwLock::new(None),
         })
     }
 
@@ -228,19 +228,30 @@ impl FileSecretStore {
             std::fs::create_dir_all(parent)?;
         }
         let data = serde_json::to_string_pretty(map)?;
-        std::fs::write(&self.path, data)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            // Create with 0600 from the start (no TOCTOU window), then fchmod the open handle
+            // so a pre-existing secrets.json with loose permissions is fixed too.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&self.path)?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            file.write_all(data.as_bytes())?;
         }
+        #[cfg(not(unix))]
+        std::fs::write(&self.path, data)?;
         Ok(())
     }
 }
 
 impl SecretStore for FileSecretStore {
     fn set(&self, profile_id: &str, cookie: &str) -> DbResult<()> {
-        let mut guard = self.cache.lock().unwrap();
+        let mut guard = self.cache.write();
         if guard.is_none() {
             *guard = Some(self.read_map()?);
         }
@@ -261,7 +272,13 @@ impl SecretStore for FileSecretStore {
     }
 
     fn get(&self, profile_id: &str) -> DbResult<Option<String>> {
-        let mut guard = self.cache.lock().unwrap();
+        {
+            let guard = self.cache.read();
+            if let Some(map) = guard.as_ref() {
+                return Ok(map.get(profile_id).cloned());
+            }
+        }
+        let mut guard = self.cache.write();
         if guard.is_none() {
             *guard = Some(self.read_map()?);
         }
@@ -269,7 +286,7 @@ impl SecretStore for FileSecretStore {
     }
 
     fn delete(&self, profile_id: &str) -> DbResult<()> {
-        let mut guard = self.cache.lock().unwrap();
+        let mut guard = self.cache.write();
         if guard.is_none() {
             *guard = Some(self.read_map()?);
         }
@@ -314,112 +331,121 @@ impl LauncherDb {
     }
 
     fn init_schema(&self) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA temp_store = MEMORY;
             PRAGMA cache_size = -32000;
+            PRAGMA mmap_size = 67108864;
             PRAGMA busy_timeout = 5000;
             PRAGMA foreign_keys = ON;
-
-            CREATE TABLE IF NOT EXISTS app_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS profiles (
-                id TEXT PRIMARY KEY,
-                label TEXT NOT NULL,
-                server_url TEXT NOT NULL,
-                username TEXT NOT NULL,
-                user_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                last_connected_at TEXT
-            );
-
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_server_user
-                ON profiles(server_url, lower(username));
-
-            CREATE TABLE IF NOT EXISTS installed_games (
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                game_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                slug TEXT NOT NULL,
-                install_dir TEXT NOT NULL,
-                executable_rel_path TEXT,
-                manifest_hash TEXT,
-                total_size INTEGER NOT NULL DEFAULT 0,
-                installed_at TEXT NOT NULL,
-                last_synced_at TEXT,
-                proton_override TEXT,
-                PRIMARY KEY (profile_id, game_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS remembered_install_dirs (
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                game_id INTEGER NOT NULL,
-                install_dir TEXT NOT NULL,
-                PRIMARY KEY (profile_id, game_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS play_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                game_id INTEGER NOT NULL,
-                started_at TEXT NOT NULL,
-                ended_at TEXT NOT NULL,
-                duration_secs INTEGER NOT NULL,
-                runtime TEXT NOT NULL,
-                synced INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sessions_profile_game
-                ON play_sessions(profile_id, game_id);
-
-            CREATE TABLE IF NOT EXISTS pending_syncs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                game_id INTEGER NOT NULL,
-                queued_at TEXT NOT NULL,
-                reason TEXT NOT NULL,
-                UNIQUE(profile_id, game_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS active_sessions (
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                game_id INTEGER NOT NULL,
-                game_name TEXT NOT NULL,
-                install_dir TEXT NOT NULL,
-                runtime TEXT NOT NULL DEFAULT 'native',
-                pid INTEGER,
-                started_at TEXT NOT NULL,
-                last_heartbeat_at TEXT NOT NULL,
-                active_secs INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (profile_id, game_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                game_id INTEGER,
-                game_name TEXT,
-                kind TEXT NOT NULL,
-                level TEXT NOT NULL DEFAULT 'info',
-                title TEXT NOT NULL,
-                detail TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_activity_logs_profile_id
-                ON activity_logs(profile_id, id DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_activity_logs_profile_created
-                ON activity_logs(profile_id, created_at DESC);
             "#,
         )?;
+        let schema_version: i64 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
+        if schema_version < 1 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS app_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS profiles (
+                    id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    server_url TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_connected_at TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_server_user
+                    ON profiles(server_url, lower(username));
+
+                CREATE TABLE IF NOT EXISTS installed_games (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    game_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    install_dir TEXT NOT NULL,
+                    executable_rel_path TEXT,
+                    manifest_hash TEXT,
+                    total_size INTEGER NOT NULL DEFAULT 0,
+                    installed_at TEXT NOT NULL,
+                    last_synced_at TEXT,
+                    proton_override TEXT,
+                    PRIMARY KEY (profile_id, game_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS remembered_install_dirs (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    game_id INTEGER NOT NULL,
+                    install_dir TEXT NOT NULL,
+                    PRIMARY KEY (profile_id, game_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS play_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    game_id INTEGER NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT NOT NULL,
+                    duration_secs INTEGER NOT NULL,
+                    runtime TEXT NOT NULL,
+                    synced INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sessions_profile_game
+                    ON play_sessions(profile_id, game_id);
+
+                CREATE TABLE IF NOT EXISTS pending_syncs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    game_id INTEGER NOT NULL,
+                    queued_at TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    UNIQUE(profile_id, game_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS active_sessions (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    game_id INTEGER NOT NULL,
+                    game_name TEXT NOT NULL,
+                    install_dir TEXT NOT NULL,
+                    runtime TEXT NOT NULL DEFAULT 'native',
+                    pid INTEGER,
+                    started_at TEXT NOT NULL,
+                    last_heartbeat_at TEXT NOT NULL,
+                    active_secs INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (profile_id, game_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS activity_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    game_id INTEGER,
+                    game_name TEXT,
+                    kind TEXT NOT NULL,
+                    level TEXT NOT NULL DEFAULT 'info',
+                    title TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_activity_logs_profile_id
+                    ON activity_logs(profile_id, id DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_activity_logs_profile_created
+                    ON activity_logs(profile_id, created_at DESC);
+
+                PRAGMA user_version = 1;
+                "#,
+            )?;
+        }
         Ok(())
     }
 
@@ -431,20 +457,20 @@ impl LauncherDb {
         user_id: i64,
         role: &str,
     ) -> DbResult<Profile> {
-        let normalized_url = server_url.trim_end_matches('/').to_string();
+        let normalized_url = server_url.trim_end_matches('/');
         let now = Utc::now();
-        let conn = self.conn.lock().unwrap();
+        let now_str = now.to_rfc3339();
+        let conn = self.conn.lock();
 
         let existing_id: Option<String> = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT id FROM profiles WHERE server_url = ?1 AND lower(username) = lower(?2)",
-                params![normalized_url, username],
-                |r| r.get(0),
-            )
+            )?
+            .query_row(params![normalized_url, username], |r| r.get(0))
             .optional()?;
 
         let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        conn.execute(
+        conn.prepare_cached(
             r#"
             INSERT INTO profiles (id, label, server_url, username, user_id, role, created_at, last_connected_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -455,29 +481,31 @@ impl LauncherDb {
                 role = excluded.role,
                 last_connected_at = excluded.last_connected_at
             "#,
-            params![
-                id,
-                label,
-                normalized_url,
-                username,
-                user_id,
-                role,
-                now.to_rfc3339(),
-                now.to_rfc3339(),
-            ],
-        )?;
-        drop(conn);
-        self.get_profile(&id)?
-            .ok_or_else(|| DbError::ProfileNotFound(id))
+        )?
+        .execute(params![
+            id,
+            label,
+            normalized_url,
+            username,
+            user_id,
+            role,
+            now_str,
+            now_str,
+        ])?;
+        conn.prepare_cached(
+            "SELECT id, label, server_url, username, user_id, role, created_at, last_connected_at FROM profiles WHERE id = ?1",
+        )?
+        .query_row(params![id], Self::row_to_profile)
+        .optional()?
+        .ok_or_else(|| DbError::ProfileNotFound(id))
     }
 
     pub fn get_profile(&self, id: &str) -> DbResult<Option<Profile>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             "SELECT id, label, server_url, username, user_id, role, created_at, last_connected_at FROM profiles WHERE id = ?1",
-            params![id],
-            Self::row_to_profile,
-        )
+        )?
+        .query_row(params![id], Self::row_to_profile)
         .optional()
         .map_err(Into::into)
     }
@@ -489,17 +517,19 @@ impl LauncherDb {
         if label.is_empty() {
             return Err(DbError::ProfileNotFound(id.to_string()));
         }
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            "UPDATE profiles SET label = ?1 WHERE id = ?2",
-            params![label, id],
-        )?;
+        let conn = self.conn.lock();
+        let changed = conn
+            .prepare_cached("UPDATE profiles SET label = ?1 WHERE id = ?2")?
+            .execute(params![label, id])?;
         if changed == 0 {
             return Err(DbError::ProfileNotFound(id.to_string()));
         }
-        drop(conn);
-        self.get_profile(id)?
-            .ok_or_else(|| DbError::ProfileNotFound(id.to_string()))
+        conn.prepare_cached(
+            "SELECT id, label, server_url, username, user_id, role, created_at, last_connected_at FROM profiles WHERE id = ?1",
+        )?
+        .query_row(params![id], Self::row_to_profile)
+        .optional()?
+        .ok_or_else(|| DbError::ProfileNotFound(id.to_string()))
     }
 
     /// Updates the account username persisted for a saved profile. The server is the source
@@ -510,22 +540,24 @@ impl LauncherDb {
         if username.is_empty() {
             return Err(DbError::ProfileNotFound(id.to_string()));
         }
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            "UPDATE profiles SET username = ?1 WHERE id = ?2",
-            params![username, id],
-        )?;
+        let conn = self.conn.lock();
+        let changed = conn
+            .prepare_cached("UPDATE profiles SET username = ?1 WHERE id = ?2")?
+            .execute(params![username, id])?;
         if changed == 0 {
             return Err(DbError::ProfileNotFound(id.to_string()));
         }
-        drop(conn);
-        self.get_profile(id)?
-            .ok_or_else(|| DbError::ProfileNotFound(id.to_string()))
+        conn.prepare_cached(
+            "SELECT id, label, server_url, username, user_id, role, created_at, last_connected_at FROM profiles WHERE id = ?1",
+        )?
+        .query_row(params![id], Self::row_to_profile)
+        .optional()?
+        .ok_or_else(|| DbError::ProfileNotFound(id.to_string()))
     }
 
     pub fn list_profiles(&self) -> DbResult<Vec<Profile>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
             "SELECT id, label, server_url, username, user_id, role, created_at, last_connected_at FROM profiles ORDER BY COALESCE(last_connected_at, created_at) DESC",
         )?;
         let rows = stmt.query_map([], Self::row_to_profile)?;
@@ -537,79 +569,71 @@ impl LauncherDb {
     }
 
     pub fn touch_profile_connected(&self, id: &str) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE profiles SET last_connected_at = ?1 WHERE id = ?2",
-            params![Utc::now().to_rfc3339(), id],
-        )?;
+        let conn = self.conn.lock();
+        conn.prepare_cached("UPDATE profiles SET last_connected_at = ?1 WHERE id = ?2")?
+            .execute(params![Utc::now().to_rfc3339(), id])?;
         Ok(())
     }
 
     pub fn delete_profile(&self, id: &str) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         // Explicit cleanup keeps the table tidy even when foreign keys are disabled.
-        conn.execute(
-            "DELETE FROM remembered_install_dirs WHERE profile_id = ?1",
-            params![id],
-        )?;
-        conn.execute("DELETE FROM profiles WHERE id = ?1", params![id])?;
-        conn.execute(
+        conn.prepare_cached("DELETE FROM remembered_install_dirs WHERE profile_id = ?1")?
+            .execute(params![id])?;
+        conn.prepare_cached("DELETE FROM profiles WHERE id = ?1")?
+            .execute(params![id])?;
+        conn.prepare_cached(
             "DELETE FROM app_state WHERE key = 'active_profile_id' AND value = ?1",
-            params![id],
-        )?;
+        )?
+        .execute(params![id])?;
         Ok(())
     }
 
     pub fn set_active_profile_id(&self, id: Option<&str>) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         match id {
             Some(pid) => {
-                conn.execute(
+                conn.prepare_cached(
                     "INSERT INTO app_state (key, value) VALUES ('active_profile_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params![pid],
-                )?;
+                )?
+                .execute(params![pid])?;
             }
             None => {
-                conn.execute("DELETE FROM app_state WHERE key = 'active_profile_id'", [])?;
+                conn.prepare_cached("DELETE FROM app_state WHERE key = 'active_profile_id'")?
+                    .execute([])?;
             }
         }
         Ok(())
     }
 
     pub fn get_active_profile_id(&self) -> DbResult<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT value FROM app_state WHERE key = 'active_profile_id'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
+        let conn = self.conn.lock();
+        conn.prepare_cached("SELECT value FROM app_state WHERE key = 'active_profile_id'")?
+            .query_row([], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn get_setting(&self, key: &str) -> DbResult<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT value FROM app_state WHERE key = ?1",
-            params![key],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
+        let conn = self.conn.lock();
+        conn.prepare_cached("SELECT value FROM app_state WHERE key = ?1")?
+            .query_row(params![key], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             "INSERT INTO app_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
+        )?
+        .execute(params![key, value])?;
         Ok(())
     }
 
     pub fn upsert_installed_game(&self, game: &InstalledGame) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             INSERT INTO installed_games (
                 profile_id, game_id, name, slug, install_dir, executable_rel_path,
@@ -625,20 +649,20 @@ impl LauncherDb {
                 last_synced_at = COALESCE(excluded.last_synced_at, installed_games.last_synced_at),
                 proton_override = COALESCE(excluded.proton_override, installed_games.proton_override)
             "#,
-            params![
-                game.profile_id,
-                game.game_id,
-                game.name,
-                game.slug,
-                game.install_dir.to_string_lossy().to_string(),
-                game.executable_rel_path,
-                game.manifest_hash,
-                game.total_size as i64,
-                game.installed_at.to_rfc3339(),
-                game.last_synced_at.map(|d| d.to_rfc3339()),
-                game.proton_override,
-            ],
-        )?;
+        )?
+        .execute(params![
+            game.profile_id,
+            game.game_id,
+            game.name,
+            game.slug,
+            game.install_dir.to_string_lossy().as_ref(),
+            game.executable_rel_path,
+            game.manifest_hash,
+            game.total_size as i64,
+            game.installed_at.to_rfc3339(),
+            game.last_synced_at.map(|d| d.to_rfc3339()),
+            game.proton_override,
+        ])?;
         Ok(())
     }
 
@@ -647,23 +671,22 @@ impl LauncherDb {
         profile_id: &str,
         game_id: i64,
     ) -> DbResult<Option<InstalledGame>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             SELECT profile_id, game_id, name, slug, install_dir, executable_rel_path,
                    manifest_hash, total_size, installed_at, last_synced_at, proton_override
             FROM installed_games WHERE profile_id = ?1 AND game_id = ?2
             "#,
-            params![profile_id, game_id],
-            Self::row_to_installed,
-        )
+        )?
+        .query_row(params![profile_id, game_id], Self::row_to_installed)
         .optional()
         .map_err(Into::into)
     }
 
     pub fn list_installed_games(&self, profile_id: &str) -> DbResult<Vec<InstalledGame>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
             r#"
             SELECT profile_id, game_id, name, slug, install_dir, executable_rel_path,
                    manifest_hash, total_size, installed_at, last_synced_at, proton_override
@@ -684,11 +707,11 @@ impl LauncherDb {
         game_id: i64,
         synced_at: DateTime<Utc>,
     ) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             "UPDATE installed_games SET last_synced_at = ?1 WHERE profile_id = ?2 AND game_id = ?3",
-            params![synced_at.to_rfc3339(), profile_id, game_id],
-        )?;
+        )?
+        .execute(params![synced_at.to_rfc3339(), profile_id, game_id])?;
         Ok(())
     }
 
@@ -698,11 +721,11 @@ impl LauncherDb {
         game_id: i64,
         exe_rel_path: Option<&str>,
     ) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             "UPDATE installed_games SET executable_rel_path = ?1 WHERE profile_id = ?2 AND game_id = ?3",
-            params![exe_rel_path, profile_id, game_id],
-        )?;
+        )?
+        .execute(params![exe_rel_path, profile_id, game_id])?;
         Ok(())
     }
 
@@ -712,20 +735,18 @@ impl LauncherDb {
         game_id: i64,
         proton_name: Option<&str>,
     ) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             "UPDATE installed_games SET proton_override = ?1 WHERE profile_id = ?2 AND game_id = ?3",
-            params![proton_name, profile_id, game_id],
-        )?;
+        )?
+        .execute(params![proton_name, profile_id, game_id])?;
         Ok(())
     }
 
     pub fn remove_installed_game(&self, profile_id: &str, game_id: i64) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM installed_games WHERE profile_id = ?1 AND game_id = ?2",
-            params![profile_id, game_id],
-        )?;
+        let conn = self.conn.lock();
+        conn.prepare_cached("DELETE FROM installed_games WHERE profile_id = ?1 AND game_id = ?2")?
+            .execute(params![profile_id, game_id])?;
         Ok(())
     }
 
@@ -737,19 +758,19 @@ impl LauncherDb {
         game_id: i64,
         install_dir: &Path,
     ) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             INSERT INTO remembered_install_dirs (profile_id, game_id, install_dir)
             VALUES (?1, ?2, ?3)
             ON CONFLICT(profile_id, game_id) DO UPDATE SET install_dir = excluded.install_dir
             "#,
-            params![
-                profile_id,
-                game_id,
-                install_dir.to_string_lossy().to_string()
-            ],
-        )?;
+        )?
+        .execute(params![
+            profile_id,
+            game_id,
+            install_dir.to_string_lossy().as_ref()
+        ])?;
         Ok(())
     }
 
@@ -758,23 +779,22 @@ impl LauncherDb {
         profile_id: &str,
         game_id: i64,
     ) -> DbResult<Option<PathBuf>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let raw: Option<String> = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT install_dir FROM remembered_install_dirs WHERE profile_id = ?1 AND game_id = ?2",
-                params![profile_id, game_id],
-                |r| r.get(0),
-            )
+            )?
+            .query_row(params![profile_id, game_id], |r| r.get(0))
             .optional()?;
         Ok(raw.map(PathBuf::from))
     }
 
     pub fn clear_remembered_install_dir(&self, profile_id: &str, game_id: i64) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             "DELETE FROM remembered_install_dirs WHERE profile_id = ?1 AND game_id = ?2",
-            params![profile_id, game_id],
-        )?;
+        )?
+        .execute(params![profile_id, game_id])?;
         Ok(())
     }
 
@@ -788,22 +808,22 @@ impl LauncherDb {
         runtime: &str,
         synced: bool,
     ) -> DbResult<PlaySession> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             INSERT INTO play_sessions (profile_id, game_id, started_at, ended_at, duration_secs, runtime, synced)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
-            params![
-                profile_id,
-                game_id,
-                started_at.to_rfc3339(),
-                ended_at.to_rfc3339(),
-                duration_secs as i64,
-                runtime,
-                if synced { 1 } else { 0 },
-            ],
-        )?;
+        )?
+        .execute(params![
+            profile_id,
+            game_id,
+            started_at.to_rfc3339(),
+            ended_at.to_rfc3339(),
+            duration_secs as i64,
+            runtime,
+            if synced { 1 } else { 0 },
+        ])?;
         let id = conn.last_insert_rowid();
         Ok(PlaySession {
             id,
@@ -818,17 +838,15 @@ impl LauncherDb {
     }
 
     pub fn mark_session_synced(&self, session_id: i64) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE play_sessions SET synced = 1 WHERE id = ?1",
-            params![session_id],
-        )?;
+        let conn = self.conn.lock();
+        conn.prepare_cached("UPDATE play_sessions SET synced = 1 WHERE id = ?1")?
+            .execute(params![session_id])?;
         Ok(())
     }
 
     pub fn list_play_sessions(&self, profile_id: &str, game_id: i64) -> DbResult<Vec<PlaySession>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
             r#"
             SELECT id, profile_id, game_id, started_at, ended_at, duration_secs, runtime, synced
             FROM play_sessions WHERE profile_id = ?1 AND game_id = ?2 ORDER BY started_at DESC
@@ -857,12 +875,14 @@ impl LauncherDb {
     }
 
     pub fn playtime_summary(&self, profile_id: &str, game_id: i64) -> DbResult<PlaytimeSummary> {
-        let conn = self.conn.lock().unwrap();
-        let (total, count, last): (i64, i64, Option<String>) = conn.query_row(
-            "SELECT COALESCE(SUM(duration_secs), 0), COUNT(*), MAX(ended_at) FROM play_sessions WHERE profile_id = ?1 AND game_id = ?2",
-            params![profile_id, game_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        let conn = self.conn.lock();
+        let (total, count, last): (i64, i64, Option<String>) = conn
+            .prepare_cached(
+                "SELECT COALESCE(SUM(duration_secs), 0), COUNT(*), MAX(ended_at) FROM play_sessions WHERE profile_id = ?1 AND game_id = ?2",
+            )?
+            .query_row(params![profile_id, game_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
         Ok(PlaytimeSummary {
             total_secs: total.max(0) as u64,
             session_count: count.max(0) as u64,
@@ -874,8 +894,8 @@ impl LauncherDb {
         &self,
         profile_id: &str,
     ) -> DbResult<HashMap<i64, PlaytimeSummary>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
             "SELECT game_id, COALESCE(SUM(duration_secs), 0), COUNT(*), MAX(ended_at) FROM play_sessions WHERE profile_id = ?1 GROUP BY game_id",
         )?;
         let rows = stmt.query_map(params![profile_id], |r| {
@@ -900,14 +920,9 @@ impl LauncherDb {
         Ok(map)
     }
 
-    pub fn queue_pending_sync(
-        &self,
-        profile_id: &str,
-        game_id: i64,
-        reason: &str,
-    ) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+    pub fn queue_pending_sync(&self, profile_id: &str, game_id: i64, reason: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             INSERT INTO pending_syncs (profile_id, game_id, queued_at, reason)
             VALUES (?1, ?2, ?3, ?4)
@@ -915,14 +930,19 @@ impl LauncherDb {
                 queued_at = excluded.queued_at,
                 reason = excluded.reason
             "#,
-            params![profile_id, game_id, Utc::now().to_rfc3339(), reason],
-        )?;
+        )?
+        .execute(params![
+            profile_id,
+            game_id,
+            Utc::now().to_rfc3339(),
+            reason
+        ])?;
         Ok(())
     }
 
     pub fn list_pending_syncs(&self, profile_id: &str) -> DbResult<Vec<PendingSync>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
             "SELECT id, profile_id, game_id, queued_at, reason FROM pending_syncs WHERE profile_id = ?1 ORDER BY queued_at ASC",
         )?;
         let rows = stmt.query_map(params![profile_id], |r| {
@@ -943,17 +963,15 @@ impl LauncherDb {
     }
 
     pub fn clear_pending_sync(&self, profile_id: &str, game_id: i64) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM pending_syncs WHERE profile_id = ?1 AND game_id = ?2",
-            params![profile_id, game_id],
-        )?;
+        let conn = self.conn.lock();
+        conn.prepare_cached("DELETE FROM pending_syncs WHERE profile_id = ?1 AND game_id = ?2")?
+            .execute(params![profile_id, game_id])?;
         Ok(())
     }
 
     pub fn upsert_active_session(&self, rec: &ActiveSessionRecord) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             INSERT INTO active_sessions (
                 profile_id, game_id, game_name, install_dir, runtime, pid,
@@ -968,18 +986,18 @@ impl LauncherDb {
                 last_heartbeat_at = excluded.last_heartbeat_at,
                 active_secs = excluded.active_secs
             "#,
-            params![
-                rec.profile_id,
-                rec.game_id,
-                rec.game_name,
-                rec.install_dir.to_string_lossy().to_string(),
-                rec.runtime,
-                rec.pid.map(|p| p as i64),
-                rec.started_at.to_rfc3339(),
-                rec.last_heartbeat_at.to_rfc3339(),
-                rec.active_secs as i64,
-            ],
-        )?;
+        )?
+        .execute(params![
+            rec.profile_id,
+            rec.game_id,
+            rec.game_name,
+            rec.install_dir.to_string_lossy().as_ref(),
+            rec.runtime,
+            rec.pid.map(|p| p as i64),
+            rec.started_at.to_rfc3339(),
+            rec.last_heartbeat_at.to_rfc3339(),
+            rec.active_secs as i64,
+        ])?;
         Ok(())
     }
 
@@ -990,20 +1008,20 @@ impl LauncherDb {
         heartbeat_at: DateTime<Utc>,
         active_secs: u64,
     ) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             UPDATE active_sessions
             SET last_heartbeat_at = ?1, active_secs = ?2
             WHERE profile_id = ?3 AND game_id = ?4
             "#,
-            params![
-                heartbeat_at.to_rfc3339(),
-                active_secs as i64,
-                profile_id,
-                game_id,
-            ],
-        )?;
+        )?
+        .execute(params![
+            heartbeat_at.to_rfc3339(),
+            active_secs as i64,
+            profile_id,
+            game_id,
+        ])?;
         Ok(())
     }
 
@@ -1012,23 +1030,22 @@ impl LauncherDb {
         profile_id: &str,
         game_id: i64,
     ) -> DbResult<Option<ActiveSessionRecord>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             SELECT profile_id, game_id, game_name, install_dir, runtime, pid,
                    started_at, last_heartbeat_at, active_secs
             FROM active_sessions WHERE profile_id = ?1 AND game_id = ?2
             "#,
-            params![profile_id, game_id],
-            Self::row_to_active_session,
-        )
+        )?
+        .query_row(params![profile_id, game_id], Self::row_to_active_session)
         .optional()
         .map_err(Into::into)
     }
 
     pub fn list_active_sessions(&self, profile_id: &str) -> DbResult<Vec<ActiveSessionRecord>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
             r#"
             SELECT profile_id, game_id, game_name, install_dir, runtime, pid,
                    started_at, last_heartbeat_at, active_secs
@@ -1044,11 +1061,9 @@ impl LauncherDb {
     }
 
     pub fn clear_active_session(&self, profile_id: &str, game_id: i64) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM active_sessions WHERE profile_id = ?1 AND game_id = ?2",
-            params![profile_id, game_id],
-        )?;
+        let conn = self.conn.lock();
+        conn.prepare_cached("DELETE FROM active_sessions WHERE profile_id = ?1 AND game_id = ?2")?
+            .execute(params![profile_id, game_id])?;
         Ok(())
     }
 
@@ -1064,26 +1079,26 @@ impl LauncherDb {
         detail: &str,
     ) -> DbResult<ActivityLogEntry> {
         let now = Utc::now();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.conn.lock();
+        conn.prepare_cached(
             r#"
             INSERT INTO activity_logs (profile_id, game_id, game_name, kind, level, title, detail, created_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
-            params![
-                profile_id,
-                game_id,
-                game_name,
-                kind,
-                level,
-                title,
-                detail,
-                now.to_rfc3339(),
-            ],
-        )?;
+        )?
+        .execute(params![
+            profile_id,
+            game_id,
+            game_name,
+            kind,
+            level,
+            title,
+            detail,
+            now.to_rfc3339(),
+        ])?;
         let id = conn.last_insert_rowid();
         // Keep the latest 200 log entries per profile so the table stays bounded.
-        let _ = conn.execute(
+        if let Ok(mut trim) = conn.prepare_cached(
             r#"
             DELETE FROM activity_logs
             WHERE profile_id = ?1
@@ -1091,8 +1106,9 @@ impl LauncherDb {
                   SELECT id FROM activity_logs WHERE profile_id = ?1 ORDER BY id DESC LIMIT 200
               )
             "#,
-            params![profile_id],
-        );
+        ) {
+            let _ = trim.execute(params![profile_id]);
+        }
         Ok(ActivityLogEntry {
             id,
             profile_id: profile_id.to_string(),
@@ -1111,8 +1127,8 @@ impl LauncherDb {
         profile_id: &str,
         limit: usize,
     ) -> DbResult<Vec<ActivityLogEntry>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
             r#"
             SELECT id, profile_id, game_id, game_name, kind, level, title, detail, created_at
             FROM activity_logs
@@ -1143,18 +1159,16 @@ impl LauncherDb {
     }
 
     pub fn clear_activity_logs(&self, profile_id: &str) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM activity_logs WHERE profile_id = ?1",
-            params![profile_id],
-        )?;
+        let conn = self.conn.lock();
+        conn.prepare_cached("DELETE FROM activity_logs WHERE profile_id = ?1")?
+            .execute(params![profile_id])?;
         Ok(())
     }
 
     /// Flushes and truncates the SQLite Write-Ahead Log so all committed state is safely
     /// merged into the main database file before application shutdown.
     pub fn checkpoint_wal(&self) -> DbResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
@@ -1234,7 +1248,9 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         assert!(
-            resolved.to_string_lossy().contains("Library/Application Support"),
+            resolved
+                .to_string_lossy()
+                .contains("Library/Application Support"),
             "macOS data dir must not use XDG paths: {resolved:?}"
         );
     }
@@ -1278,7 +1294,7 @@ mod tests {
     #[test]
     fn init_schema_sets_pragmas_and_activity_log_index() {
         let db = LauncherDb::open_in_memory().unwrap();
-        let conn = db.conn.lock().unwrap();
+        let conn = db.conn.lock();
         let sync_mode: i64 = conn
             .query_row("PRAGMA synchronous;", [], |r| r.get(0))
             .unwrap();

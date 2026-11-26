@@ -29,6 +29,15 @@ fn tracking_session_clock_excludes_system_suspend_sleep_jumps() {
         start + ChronoDuration::seconds(15 + 7200),
         Duration::from_secs(16),
     );
+    // Unix monotonic clocks stop during sleep, so the 1s before sleep is counted.
+    #[cfg(unix)]
+    assert_eq!(
+        clock.active_secs(),
+        16,
+        "2-hour suspend gap must NOT be counted as screen time"
+    );
+    // Windows `Instant` keeps ticking through sleep; the conservative cap drops the tick.
+    #[cfg(not(unix))]
     assert_eq!(
         clock.active_secs(),
         15,
@@ -44,6 +53,9 @@ fn tracking_session_clock_excludes_system_suspend_sleep_jumps() {
         start + ChronoDuration::seconds(15 + 7200 + 10),
         Duration::from_secs(26),
     );
+    #[cfg(unix)]
+    assert_eq!(clock.active_secs(), 26);
+    #[cfg(not(unix))]
     assert_eq!(clock.active_secs(), 25);
 }
 
@@ -88,7 +100,10 @@ async fn tracking_records_real_process_sessions_and_accumulates_playtime() {
         .await
         .unwrap();
     assert_eq!(first.exit_code, Some(0));
-    assert!(matches!(first.sync_status, PostExitSyncStatus::SkippedDisabled));
+    assert!(matches!(
+        first.sync_status,
+        PostExitSyncStatus::SkippedDisabled
+    ));
     assert!(
         first.session.duration_secs >= 1,
         "expected >= 1s active screen time, got {}",
@@ -121,7 +136,11 @@ fn proton_auto_detection_binary_classification_and_ge_installer() {
         b"MZ\x90\x00redist",
     )
     .unwrap();
-    fs::write(game_dir.join("CyberRunner.exe"), vec![b'M', b'Z', 0x90, 0x00, 0x01, 0x02]).unwrap();
+    fs::write(
+        game_dir.join("CyberRunner.exe"),
+        vec![b'M', b'Z', 0x90, 0x00, 0x01, 0x02],
+    )
+    .unwrap();
     fs::write(game_dir.join("helper.dll"), b"MZ\x90\x00dll").unwrap();
     fs::write(game_dir.join("native_tool"), b"\x7fELF\x02\x01\x01\x00").unwrap();
 
@@ -137,7 +156,9 @@ fn proton_auto_detection_binary_classification_and_ge_installer() {
     let exes = discover_executables(&game_dir, "Cyber Runner");
     assert_eq!(exes[0].rel_path, "CyberRunner.exe");
     assert_eq!(exes[0].kind, BinaryKind::WindowsPe);
-    assert!(exes.iter().all(|e| !e.rel_path.contains("unins") && !e.rel_path.contains("vcredist") && !e.rel_path.ends_with(".dll")));
+    assert!(exes.iter().all(|e| !e.rel_path.contains("unins")
+        && !e.rel_path.contains("vcredist")
+        && !e.rel_path.ends_with(".dll")));
 
     // 2. Proton auto-detection prioritizes OpenSyncManaged > SteamCompatTools > SteamCommon
     let managed = dir.path().join("managed");
@@ -170,10 +191,18 @@ fn proton_auto_detection_binary_classification_and_ge_installer() {
         assert!(matches!(err, ProtonError::NotInstalled));
 
         // With Proton detected, builds isolated STEAM_COMPAT_DATA_PATH launch command
-        let cmd =
-            build_launch_command(&exes[0], &prefix, Some(&detected[0]), &["--windowed".into()])
-                .unwrap();
-        assert!(cmd.env.iter().any(|(k, v)| k == "STEAM_COMPAT_DATA_PATH" && v.contains("prefixes")));
+        let cmd = build_launch_command(
+            &exes[0],
+            &prefix,
+            Some(&detected[0]),
+            &["--windowed".into()],
+        )
+        .unwrap();
+        assert!(
+            cmd.env
+                .iter()
+                .any(|(k, v)| k == "STEAM_COMPAT_DATA_PATH" && v.contains("prefixes"))
+        );
         assert!(cmd.args.iter().any(|a| a.ends_with("CyberRunner.exe")));
         assert!(cmd.args.contains(&"--windowed".to_string()));
     }
@@ -183,9 +212,13 @@ fn proton_auto_detection_binary_classification_and_ge_installer() {
         // Wine/Whisky/CrossOver runner or cleanly falls back to native execution.
         let cmd = build_launch_command(&exes[0], &prefix, None, &[]).unwrap();
         assert!(cmd.program.is_absolute());
-        let cmd =
-            build_launch_command(&exes[0], &prefix, Some(&detected[0]), &["--windowed".into()])
-                .unwrap();
+        let cmd = build_launch_command(
+            &exes[0],
+            &prefix,
+            Some(&detected[0]),
+            &["--windowed".into()],
+        )
+        .unwrap();
         assert!(
             cmd.program.ends_with("CyberRunner.exe")
                 || cmd.args.iter().any(|a| a.ends_with("CyberRunner.exe"))

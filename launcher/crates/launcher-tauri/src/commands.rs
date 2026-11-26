@@ -9,7 +9,7 @@ use launcher_db::{ActivityLogEntry, InstalledGame, PendingSync, PlaytimeSummary,
 use opensync_api::{ApiError, Game, User, safe_image_mime};
 use opensync_proton::{
     BinaryKind, DiscoveredExecutable, GeProtonRelease, ProtonInstallation, detect_binary_kind,
-    discover_executables,
+    discover_executables, is_macos_app_bundle,
 };
 use opensync_runner::LaunchOptions;
 use opensync_sync::SyncReport;
@@ -344,11 +344,7 @@ pub async fn delete_profile(
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_current_user_profile(state: State<'_, AppState>) -> Result<User, String> {
-    state
-        .core
-        .get_current_user_profile()
-        .await
-        .map_err(err_str)
+    state.core.get_current_user_profile().await.map_err(err_str)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -446,20 +442,13 @@ pub async fn remove_profile_pfp(state: State<'_, AppState>) -> Result<String, St
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn delete_server_account(state: State<'_, AppState>) -> Result<bool, String> {
-    state
-        .core
-        .delete_active_account()
-        .await
-        .map_err(err_str)?;
+    state.core.delete_active_account().await.map_err(err_str)?;
     state.clear_media_caches();
     Ok(true)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn rename_profile(
-    state: State<'_, AppState>,
-    label: String,
-) -> Result<Profile, String> {
+pub async fn rename_profile(state: State<'_, AppState>, label: String) -> Result<Profile, String> {
     state.core.rename_profile(&label).await.map_err(err_str)
 }
 
@@ -489,14 +478,18 @@ fn scan_one_game_executables(
     let selected_kind = exe_override
         .and_then(|rel| {
             let abs = dir.join(rel);
-            if abs.is_file() {
+            // Match resolve_launch_command: regular files and macOS `.app` bundles are valid.
+            if abs.is_file() || is_macos_app_bundle(&abs) {
                 Some(detect_binary_kind(&abs))
             } else {
                 None
             }
         })
         .or_else(|| discovered.first().map(|e| e.kind));
-    let opts = discovered.into_iter().map(ExecutableOptionDto::from).collect();
+    let opts = discovered
+        .into_iter()
+        .map(ExecutableOptionDto::from)
+        .collect();
     (opts, selected_kind)
 }
 
@@ -513,7 +506,9 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
         state.core.list_downloaded_games(),
         state.core.list_pending_syncs(),
         tokio::task::spawn_blocking(move || {
-            core_for_playtime.db().playtime_summaries_for_profile(&profile_id)
+            core_for_playtime
+                .db()
+                .playtime_summaries_for_profile(&profile_id)
         }),
     );
 
@@ -583,11 +578,8 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
                         misses
                             .into_iter()
                             .map(|(gid, dir, name, exe_override, mtime)| {
-                                let (opts, kind) = scan_one_game_executables(
-                                    &dir,
-                                    &name,
-                                    exe_override.as_deref(),
-                                );
+                                let (opts, kind) =
+                                    scan_one_game_executables(&dir, &name, exe_override.as_deref());
                                 (gid, dir, mtime, exe_override, opts, kind)
                             })
                             .collect()
@@ -687,12 +679,17 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
             uploader_pfp: remote.uploader_pfp,
             created_at: remote.created_at,
             status: remote.status,
-            total_size: inst.as_ref().map(|i| i.total_size.max(remote.total_size)).unwrap_or(remote.total_size),
+            total_size: inst
+                .as_ref()
+                .map(|i| i.total_size.max(remote.total_size))
+                .unwrap_or(remote.total_size),
             download_count: remote.download_count,
             has_cover: remote.cover.is_some(),
             has_overlay: remote.has_overlay,
             installed: inst.is_some(),
-            install_dir: inst.as_ref().map(|i| i.install_dir.to_string_lossy().to_string()),
+            install_dir: inst
+                .as_ref()
+                .map(|i| i.install_dir.to_string_lossy().to_string()),
             executable_rel_path: inst.as_ref().and_then(|i| i.executable_rel_path.clone()),
             discovered_executables,
             binary_kind,
@@ -708,14 +705,11 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
         if seen_ids.contains(&gid) {
             continue;
         }
-        let playtime = playtime_map
-            .get(&gid)
-            .cloned()
-            .unwrap_or(PlaytimeSummary {
-                total_secs: 0,
-                session_count: 0,
-                last_played_at: None,
-            });
+        let playtime = playtime_map.get(&gid).cloned().unwrap_or(PlaytimeSummary {
+            total_secs: 0,
+            session_count: 0,
+            last_played_at: None,
+        });
         let (discovered_executables, binary_kind) = discovered_map
             .get(&gid)
             .cloned()
@@ -826,7 +820,9 @@ pub async fn set_bandwidth_limit(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn list_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadJobSnapshot>, String> {
+pub async fn list_downloads(
+    state: State<'_, AppState>,
+) -> Result<Vec<DownloadJobSnapshot>, String> {
     Ok(state.core.list_downloads().await)
 }
 
@@ -978,7 +974,18 @@ pub async fn pick_upload_folder() -> Result<Option<String>, String> {
             ],
         );
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        let picked = try_dialog(
+            "osascript",
+            &[
+                "-e",
+                "set p to choose folder with prompt \"Choose game folder\"",
+                "-e",
+                "return POSIX path of p",
+            ],
+        );
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let picked = try_dialog(
             "zenity",
             &["--file-selection", "--directory", "--title=Choose game folder"],
@@ -997,7 +1004,11 @@ pub async fn pick_upload_folder() -> Result<Option<String>, String> {
     .map_err(|e| format!("folder dialog failed: {e}"))
 }
 
-fn collect_upload_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, u64)>) {
+fn collect_upload_files(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    out: &mut Vec<(String, u64)>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1019,7 +1030,7 @@ fn collect_upload_files(dir: &std::path::Path, root: &std::path::Path, out: &mut
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             out.push((rel, size));
         }
     }
@@ -1037,11 +1048,7 @@ pub async fn scan_upload_folder(path: String) -> Result<FolderScanDto, String> {
         collect_upload_files(&root, &root, &mut files);
         files.sort_by(|a, b| b.1.cmp(&a.1));
         let total_bytes = files.iter().map(|(_, size)| *size).sum();
-        let top_files = files
-            .iter()
-            .take(8)
-            .map(|(rel, _)| rel.clone())
-            .collect();
+        let top_files = files.iter().take(8).map(|(rel, _)| rel.clone()).collect();
         let name = root
             .file_name()
             .map(|n| n.to_string_lossy().replace('_', " "))

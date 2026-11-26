@@ -45,8 +45,13 @@ fn main() {
         tracing::error!(path = %data_root.display(), error = %err, "failed to create launcher data directory");
     }
 
-    let db = LauncherDb::open(data_root.join("launcher.db"))
-        .expect("failed to initialize launcher SQLite database");
+    let db = match LauncherDb::open(data_root.join("launcher.db")) {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::error!(path = %data_root.display(), error = %err, "failed to initialize launcher SQLite database");
+            std::process::exit(1);
+        }
+    };
     let secrets = FileSecretStore::new(data_root.join("secrets.json"));
 
     // Games are installed into a dedicated `Games/OpenSync` folder, overridable from

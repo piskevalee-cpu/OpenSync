@@ -1,19 +1,29 @@
 use bytes::Bytes;
 use opensync_api::{ApiError, GameManifest, OpenSyncClient};
 use rayon::prelude::*;
+use ring::digest::{Context as DigestContext, SHA256};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{Semaphore, mpsc};
-use walkdir::WalkDir;
 
-const HASH_BUF_SIZE: usize = 512 * 1024;
+const HASH_BUF_SIZE: usize = 1024 * 1024;
 const UPLOAD_CONCURRENCY: usize = 6;
+/// Upper bound for the single-chunk fast path; larger files always use bounded chunked reads.
+const MAX_FAST_PATH_BYTES: u64 = 16 * 1024 * 1024;
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirFingerprint {
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub max_mtime_nanos: u128,
+}
 
 #[derive(Debug, Error)]
 pub enum SyncError {
@@ -21,7 +31,9 @@ pub enum SyncError {
     Api(#[from] ApiError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("mass deletion guard triggered: {deleted} of {total} files ({pct}%) missing; set force=true to proceed")]
+    #[error(
+        "mass deletion guard triggered: {deleted} of {total} files ({pct}%) missing; set force=true to proceed"
+    )]
     MassDeletionGuard {
         deleted: usize,
         total: usize,
@@ -90,35 +102,113 @@ pub struct LocalSaveInspection {
     pub sample_paths: Vec<String>,
 }
 
-/// Scans `root` recursively and computes SHA-256 hashes in parallel via `rayon`.
-pub fn scan_folder_parallel(root: &Path) -> SyncResult<Vec<LocalFile>> {
+fn mtime_nanos(meta: &std::fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Computes a metadata-only fingerprint of `root` (file count, total bytes, max mtime nanos),
+/// ignoring symlinks and `.part` files.
+pub fn compute_dir_fingerprint(root: &Path) -> std::io::Result<DirFingerprint> {
+    if !root.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("directory does not exist: {}", root.display()),
+        ));
+    }
+    let mut fp = DirFingerprint::default();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            if entry.file_name().as_encoded_bytes().ends_with(b".part") {
+                continue;
+            }
+            let meta = entry.metadata()?;
+            fp.file_count += 1;
+            fp.total_bytes = fp.total_bytes.saturating_add(meta.len());
+            fp.max_mtime_nanos = fp.max_mtime_nanos.max(mtime_nanos(&meta));
+        }
+    }
+    Ok(fp)
+}
+
+/// Scans `root` recursively, computes SHA-256 hashes in parallel via `rayon`, and captures
+/// the directory's metadata fingerprint in the same traversal.
+pub fn scan_folder_with_fingerprint(root: &Path) -> SyncResult<(Vec<LocalFile>, DirFingerprint)> {
     if !root.exists() {
         return Err(SyncError::MissingInstallDir(root.to_path_buf()));
     }
 
-    let entries: Vec<(String, PathBuf, u64)> = WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| {
-            let abs = e.path().to_path_buf();
-            let rel = abs.strip_prefix(root).ok()?;
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            if rel_str.ends_with(".part") {
-                return None;
+    let mut entries: Vec<(String, PathBuf, u64)> = Vec::new();
+    let mut fp = DirFingerprint::default();
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+
+    while let Some((dir, prefix)) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.filter_map(Result::ok) {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
             }
-            let size = e.metadata().ok()?.len();
-            Some((rel_str, abs, size))
-        })
-        .collect();
+            let file_name = entry.file_name();
+            let name_cow = file_name.to_string_lossy();
+            if ft.is_dir() {
+                let next_prefix = if prefix.is_empty() {
+                    name_cow.into_owned()
+                } else {
+                    format!("{prefix}/{name_cow}")
+                };
+                stack.push((entry.path(), next_prefix));
+                continue;
+            }
+            if !ft.is_file() || name_cow.ends_with(".part") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            let size = meta.len();
+            fp.file_count += 1;
+            fp.total_bytes = fp.total_bytes.saturating_add(size);
+            fp.max_mtime_nanos = fp.max_mtime_nanos.max(mtime_nanos(&meta));
+            let rel_path = if prefix.is_empty() {
+                name_cow.into_owned()
+            } else {
+                format!("{prefix}/{name_cow}")
+            };
+            entries.push((rel_path, entry.path(), size));
+        }
+    }
 
     let mut hashed: Vec<LocalFile> = entries
         .into_par_iter()
         .map_init(
             || vec![0u8; HASH_BUF_SIZE],
             |buf, (rel_path, abs_path, size)| {
-                let sha256 = hash_file_sha256_with_buf(&abs_path, buf)?;
+                let sha256 = if size == 0 {
+                    EMPTY_SHA256.to_string()
+                } else {
+                    hash_file_sha256_with_buf(&abs_path, buf)?
+                };
                 Ok(LocalFile {
                     rel_path,
                     abs_path,
@@ -130,12 +220,17 @@ pub fn scan_folder_parallel(root: &Path) -> SyncResult<Vec<LocalFile>> {
         .collect::<Result<Vec<_>, std::io::Error>>()?;
 
     hashed.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    Ok(hashed)
+    Ok((hashed, fp))
+}
+
+/// Scans `root` recursively and computes SHA-256 hashes in parallel via `rayon`.
+pub fn scan_folder_parallel(root: &Path) -> SyncResult<Vec<LocalFile>> {
+    scan_folder_with_fingerprint(root).map(|(files, _)| files)
 }
 
 fn hash_file_sha256_with_buf(path: &Path, buf: &mut [u8]) -> std::io::Result<String> {
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = DigestContext::new(&SHA256);
     loop {
         match file.read(buf) {
             Ok(0) => break,
@@ -144,7 +239,7 @@ fn hash_file_sha256_with_buf(path: &Path, buf: &mut [u8]) -> std::io::Result<Str
             Err(e) => return Err(e),
         }
     }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(hex::encode(hasher.finish().as_ref()))
 }
 
 pub fn hash_file_sha256(path: &Path) -> std::io::Result<String> {
@@ -207,11 +302,27 @@ pub async fn sync_game_saves(
     install_dir: &Path,
     force_mass_deletion: bool,
 ) -> SyncResult<SyncReport> {
-    let manifest = client.get_manifest(game_id).await?;
-    let dir_clone = install_dir.to_path_buf();
-    let local_files = tokio::task::spawn_blocking(move || scan_folder_parallel(&dir_clone))
+    sync_game_saves_with_fingerprint(client, game_id, install_dir, force_mass_deletion)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))??;
+        .map(|(report, _)| report)
+}
+
+/// Same as [`sync_game_saves`], also returning the directory's [`DirFingerprint`] captured
+/// during the scan so callers can cache idle-skip state without re-walking disk.
+pub async fn sync_game_saves_with_fingerprint(
+    client: &OpenSyncClient,
+    game_id: i64,
+    install_dir: &Path,
+    force_mass_deletion: bool,
+) -> SyncResult<(SyncReport, DirFingerprint)> {
+    let dir_clone = install_dir.to_path_buf();
+    let scan_fut = async move {
+        tokio::task::spawn_blocking(move || scan_folder_with_fingerprint(&dir_clone))
+            .await
+            .map_err(|e| SyncError::Io(std::io::Error::other(e.to_string())))?
+    };
+    let manifest_fut = async move { client.get_manifest(game_id).await.map_err(SyncError::from) };
+    let ((local_files, fp), manifest) = tokio::try_join!(scan_fut, manifest_fut)?;
 
     let diff = compute_diff(&local_files, &manifest);
 
@@ -231,51 +342,111 @@ pub async fn sync_game_saves(
     if diff.is_empty() {
         // Still commit empty sync if needed? No-op when completely identical to clean manifest
         // unless caller explicitly wants to clear — return clean zero-upload report.
-        return Ok(SyncReport {
-            uploaded_files: 0,
-            uploaded_bytes: 0,
-            deleted_paths: 0,
-            skipped_unchanged: diff.unchanged_count,
-        });
+        return Ok((
+            SyncReport {
+                uploaded_files: 0,
+                uploaded_bytes: 0,
+                deleted_paths: 0,
+                skipped_unchanged: diff.unchanged_count,
+            },
+            fp,
+        ));
     }
 
     let init = client.overlay_init(game_id).await?;
     let chunk_size = init.chunk_size.max(1);
-    let resume_map: Arc<HashMap<String, usize>> = Arc::new(
-        init.files
-            .into_iter()
-            .map(|p| (p.path, p.received))
-            .collect(),
-    );
+    let resume_map: HashMap<String, usize> = init
+        .files
+        .into_iter()
+        .map(|p| (p.path, p.received))
+        .collect();
 
-    let sem = Arc::new(Semaphore::new(UPLOAD_CONCURRENCY));
-    let mut handles = Vec::with_capacity(diff.uploads.len());
-
-    for item in diff.uploads.clone() {
-        let permit = sem.clone().acquire_owned().await.unwrap();
-        let client = client.clone();
+    if diff.uploads.len() == 1 {
+        let item = &diff.uploads[0];
         let resume_from = *resume_map.get(&item.rel_path).unwrap_or(&0);
-        handles.push(tokio::spawn(async move {
-            let _permit = permit;
-            upload_file_chunked(&client, game_id, &item, chunk_size, resume_from).await
-        }));
-    }
+        if resume_from == 0 && item.size <= chunk_size as u64 && item.size <= MAX_FAST_PATH_BYTES {
+            // Read at most one chunk plus one sentinel byte. If the file grew between the
+            // scan and the read, fall back to the bounded chunked path instead of pulling
+            // an arbitrarily large file into memory.
+            let mut bounded: Option<Bytes> = None;
+            if item.size == 0 {
+                bounded = Some(Bytes::new());
+            } else {
+                let mut file = tokio::fs::File::open(&item.abs_path).await?;
+                let mut buf = vec![0u8; (item.size as usize).saturating_add(1)];
+                let mut read = 0usize;
+                while read < buf.len() {
+                    let n = file.read(&mut buf[read..]).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    read += n;
+                }
+                if read <= item.size as usize {
+                    buf.truncate(read);
+                    bounded = Some(Bytes::from(buf));
+                }
+            }
+            match bounded {
+                Some(chunk_bytes) => {
+                    match client
+                        .upload_overlay_chunk(
+                            game_id,
+                            &item.rel_path,
+                            0,
+                            1,
+                            item.size,
+                            &item.sha256,
+                            chunk_bytes,
+                        )
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(ApiError::ResumeRequired { received }) => {
+                            upload_file_chunked(client, game_id, item, chunk_size, received)
+                                .await?;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                None => upload_file_chunked(client, game_id, item, chunk_size, 0).await?,
+            }
+        } else {
+            upload_file_chunked(client, game_id, item, chunk_size, resume_from).await?;
+        }
+    } else if !diff.uploads.is_empty() {
+        let sem = Arc::new(Semaphore::new(UPLOAD_CONCURRENCY));
+        let mut handles = Vec::with_capacity(diff.uploads.len());
 
-    for h in handles {
-        h.await
-            .map_err(|e| std::io::Error::other(e.to_string()))??;
+        for item in diff.uploads.clone() {
+            let permit = sem.clone().acquire_owned().await.unwrap();
+            let client = client.clone();
+            let resume_from = *resume_map.get(&item.rel_path).unwrap_or(&0);
+            handles.push(tokio::spawn(async move {
+                let _permit = permit;
+                upload_file_chunked(&client, game_id, &item, chunk_size, resume_from).await
+            }));
+        }
+
+        for h in handles {
+            h.await
+                .map_err(|e| std::io::Error::other(e.to_string()))??;
+        }
     }
 
     client
         .sync_complete(game_id, &diff.deletions, force_mass_deletion)
         .await?;
 
-    Ok(SyncReport {
-        uploaded_files: diff.uploads.len(),
-        uploaded_bytes: diff.upload_bytes(),
-        deleted_paths: diff.deletions.len(),
-        skipped_unchanged: diff.unchanged_count,
-    })
+    Ok((
+        SyncReport {
+            uploaded_files: diff.uploads.len(),
+            uploaded_bytes: diff.upload_bytes(),
+            deleted_paths: diff.deletions.len(),
+            skipped_unchanged: diff.unchanged_count,
+        },
+        fp,
+    ))
 }
 
 async fn upload_file_chunked(
@@ -390,6 +561,9 @@ pub fn inspect_unsynced_saves(
     }
 
     if let Some(manifest) = clean_manifest {
+        // Filesystems with coarse mtime granularity (FAT32 ~2s, HFS+/SMB/NFS ~1s) can write
+        // a save just after the last sync with an mtime slightly *before* the recorded UTC
+        // timestamp. Keep a 1s grace window so crash recovery does not silently miss it.
         let cutoff = last_synced_at.map(|last_sync| {
             last_sync
                 .checked_sub(std::time::Duration::from_secs(1))
@@ -411,46 +585,65 @@ pub fn inspect_unsynced_saves(
         let mut local_paths = HashSet::new();
         let mut changed: Vec<(String, u64)> = Vec::new();
         let mut to_hash: Vec<SameSizeCandidate<'_>> = Vec::new();
+        let mut stack = vec![(install_dir.to_path_buf(), String::new())];
 
-        for entry in WalkDir::new(install_dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-        {
-            let abs_path = entry.path().to_path_buf();
-            let Ok(rel) = abs_path.strip_prefix(install_dir) else {
+        while let Some((dir, prefix)) = stack.pop() {
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            let rel_path = rel.to_string_lossy().replace('\\', "/");
-            if rel_path.ends_with(".part") {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            let size = meta.len();
-            local_paths.insert(rel_path.clone());
-
-            if let Some(cutoff_time) = cutoff {
-                let is_recent = meta
-                    .modified()
-                    .map(|mtime| mtime >= cutoff_time)
-                    .unwrap_or(true);
-                if !is_recent {
+            for entry in read_dir.filter_map(Result::ok) {
+                let Ok(ft) = entry.file_type() else {
+                    continue;
+                };
+                if ft.is_symlink() {
                     continue;
                 }
-            }
+                let file_name = entry.file_name();
+                let name_cow = file_name.to_string_lossy();
+                if ft.is_dir() {
+                    let next_prefix = if prefix.is_empty() {
+                        name_cow.into_owned()
+                    } else {
+                        format!("{prefix}/{name_cow}")
+                    };
+                    stack.push((entry.path(), next_prefix));
+                    continue;
+                }
+                if !ft.is_file() || name_cow.ends_with(".part") {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                let rel_path = if prefix.is_empty() {
+                    name_cow.into_owned()
+                } else {
+                    format!("{prefix}/{name_cow}")
+                };
+                let size = meta.len();
+                local_paths.insert(rel_path.clone());
 
-            match clean_map.get(rel_path.as_str()) {
-                None => changed.push((rel_path, size)),
-                Some(clean) if clean.size != size => changed.push((rel_path, size)),
-                Some(clean) => to_hash.push(SameSizeCandidate {
-                    rel_path,
-                    abs_path,
-                    size,
-                    expected_hash: clean.hash.as_str(),
-                }),
+                if let Some(cutoff_time) = cutoff {
+                    let is_recent = meta
+                        .modified()
+                        .map(|mtime| mtime >= cutoff_time)
+                        .unwrap_or(true);
+                    if !is_recent {
+                        continue;
+                    }
+                }
+
+                let abs_path = entry.path();
+                match clean_map.get(rel_path.as_str()) {
+                    None => changed.push((rel_path, size)),
+                    Some(clean) if clean.size != size => changed.push((rel_path, size)),
+                    Some(clean) => to_hash.push(SameSizeCandidate {
+                        rel_path,
+                        abs_path,
+                        size,
+                        expected_hash: clean.hash.as_str(),
+                    }),
+                }
             }
         }
 
@@ -460,7 +653,11 @@ pub fn inspect_unsynced_saves(
                 .map_init(
                     || vec![0u8; HASH_BUF_SIZE],
                     |buf, cand| {
-                        let sha256 = hash_file_sha256_with_buf(&cand.abs_path, buf)?;
+                        let sha256 = if cand.size == 0 {
+                            EMPTY_SHA256.to_string()
+                        } else {
+                            hash_file_sha256_with_buf(&cand.abs_path, buf)?
+                        };
                         if sha256 != cand.expected_hash {
                             Ok(Some((cand.rel_path, cand.size)))
                         } else {
@@ -522,29 +719,47 @@ pub fn inspect_unsynced_saves(
     let mut changed_files = 0usize;
     let mut changed_bytes = 0u64;
     let mut sample_paths = Vec::new();
+    let mut stack = vec![(install_dir.to_path_buf(), String::new())];
 
-    for entry in WalkDir::new(install_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-    {
-        let abs = entry.path();
-        let Ok(rel) = abs.strip_prefix(install_dir) else {
+    while let Some((dir, prefix)) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
             continue;
         };
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if rel_str.ends_with(".part") {
-            continue;
-        }
-        if let Ok(meta) = entry.metadata()
-            && let Ok(mtime) = meta.modified()
-            && mtime >= cutoff
-        {
-            changed_files += 1;
-            changed_bytes += meta.len();
-            if sample_paths.len() < 5 {
-                sample_paths.push(rel_str);
+        for entry in read_dir.filter_map(Result::ok) {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let name_cow = file_name.to_string_lossy();
+            if ft.is_dir() {
+                let next_prefix = if prefix.is_empty() {
+                    name_cow.into_owned()
+                } else {
+                    format!("{prefix}/{name_cow}")
+                };
+                stack.push((entry.path(), next_prefix));
+                continue;
+            }
+            if !ft.is_file() || name_cow.ends_with(".part") {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata()
+                && let Ok(mtime) = meta.modified()
+                && mtime >= cutoff
+            {
+                changed_files += 1;
+                changed_bytes += meta.len();
+                if sample_paths.len() < 5 {
+                    let rel_str = if prefix.is_empty() {
+                        name_cow.into_owned()
+                    } else {
+                        format!("{prefix}/{name_cow}")
+                    };
+                    sample_paths.push(rel_str);
+                }
             }
         }
     }
@@ -562,6 +777,7 @@ pub fn inspect_unsynced_saves(
 mod tests {
     use super::*;
     use opensync_api::ManifestEntry;
+    use sha2::{Digest, Sha256};
     use std::fs;
     use std::time::{Duration, SystemTime};
     use tempfile::tempdir;

@@ -2,10 +2,11 @@ use bytes::Bytes;
 use crc32fast::Hasher as Crc32;
 use flate2::read::DeflateDecoder;
 use futures_util::StreamExt;
+use memchr::memmem;
 use opensync_api::{ApiError, GameManifest, OpenSyncClient};
+use ring::digest::{Context as DigestContext, SHA256};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -571,17 +572,17 @@ pub fn safe_rel_path(raw: &str) -> TransferResult<PathBuf> {
 
 /// Computes a deterministic SHA-256 fingerprint of a clean manifest's file list.
 pub fn manifest_fingerprint(manifest: &GameManifest) -> String {
-    let mut sorted = manifest.files.clone();
+    let mut sorted: Vec<&opensync_api::ManifestEntry> = manifest.files.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut hasher = Sha256::new();
-    for f in &sorted {
+    let mut hasher = DigestContext::new(&SHA256);
+    for f in sorted {
         hasher.update(f.path.as_bytes());
         hasher.update(b"\0");
         hasher.update(f.hash.as_bytes());
         hasher.update(b"\0");
-        hasher.update(f.size.to_le_bytes());
+        hasher.update(&f.size.to_le_bytes());
     }
-    hex::encode(hasher.finalize())
+    hex::encode(hasher.finish().as_ref())
 }
 
 /// Downloads and extracts a game directly from OpenSync's streaming ZIP endpoint
@@ -596,7 +597,10 @@ pub async fn download_and_extract_game(
     control: DownloadControl,
 ) -> TransferResult<DownloadOutcome> {
     let started = Instant::now();
-    let manifest = client.get_manifest(game_id).await?;
+    let (manifest, response) = tokio::try_join!(
+        client.get_manifest(game_id),
+        client.open_download_stream(game_id, fresh)
+    )?;
     let expected_total: u64 = manifest.files.iter().map(|f| f.size).sum();
     let manifest_hash = manifest_fingerprint(&manifest);
     {
@@ -618,14 +622,6 @@ pub async fn download_and_extract_game(
         fs::remove_dir_all(&staging_dir)?;
     }
     fs::create_dir_all(&staging_dir)?;
-
-    let response = match client.open_download_stream(game_id, fresh).await {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = fs::remove_dir_all(&staging_dir);
-            return Err(e.into());
-        }
-    };
 
     // Bounded channel overlaps HTTP socket reads with disk writing & SHA-256 hashing.
     let (tx, rx) = mpsc::channel::<Result<Bytes, TransferError>>(32);
@@ -886,8 +882,10 @@ pub fn extract_zip_stream<R: Read>(
     control: &DownloadControl,
 ) -> TransferResult<Vec<ExtractedFile>> {
     const MAX_DD: usize = 24;
-    let mut r = PeekableReader::new(BufReader::with_capacity(STREAM_CHUNK_BUF, reader));
+    let mut r = PeekableReader::new(BufReader::with_capacity(64 * 1024, reader));
+    let dd_finder = memmem::Finder::new(&DATA_DESCRIPTOR_SIG);
     let mut extracted = Vec::new();
+    let mut created_dirs: HashSet<PathBuf> = HashSet::new();
     let mut copy_buf = vec![0u8; STREAM_CHUNK_BUF];
     let mut dd_buf = vec![0u8; STREAM_CHUNK_BUF + MAX_DD];
     let mut name_buf = Vec::with_capacity(256);
@@ -939,7 +937,11 @@ pub fn extract_zip_stream<R: Read>(
             let trimmed = raw_name.trim_end_matches('/');
             if !trimmed.is_empty() {
                 let rel = safe_rel_path(trimmed)?;
-                fs::create_dir_all(dest_root.join(rel))?;
+                let dir_path = dest_root.join(rel);
+                if !created_dirs.contains(&dir_path) {
+                    fs::create_dir_all(&dir_path)?;
+                    created_dirs.insert(dir_path);
+                }
             }
             if has_data_descriptor {
                 skip_data_descriptor(&mut r, is_zip64)?;
@@ -958,8 +960,11 @@ pub fn extract_zip_stream<R: Read>(
         }
 
         let out_path = dest_root.join(&rel);
-        if let Some(parent) = out_path.parent() {
+        if let Some(parent) = out_path.parent()
+            && !created_dirs.contains(parent)
+        {
             fs::create_dir_all(parent)?;
+            created_dirs.insert(parent.to_path_buf());
         }
         let file = File::create(&out_path)?;
         if !has_data_descriptor && uncomp_size > 0 {
@@ -969,10 +974,10 @@ pub fn extract_zip_stream<R: Read>(
         let write_buf_cap = if !has_data_descriptor {
             (uncomp_size as usize).clamp(4096, FILE_WRITE_BUF)
         } else {
-            256 * 1024
+            64 * 1024
         };
         let mut writer = BufWriter::with_capacity(write_buf_cap, file);
-        let mut sha = Sha256::new();
+        let mut sha = DigestContext::new(&SHA256);
         let mut crc = Crc32::new();
         let mut written: u64 = 0;
 
@@ -1011,6 +1016,7 @@ pub fn extract_zip_stream<R: Read>(
                         &mut writer,
                         &mut sha,
                         &mut dd_buf,
+                        &dd_finder,
                         control,
                     )?;
                 }
@@ -1072,7 +1078,7 @@ pub fn extract_zip_stream<R: Read>(
         }
 
         writer.flush()?;
-        let sha256 = hex::encode(sha.finalize());
+        let sha256 = hex::encode(sha.finish().as_ref());
         extracted.push(ExtractedFile {
             path: normalized_name,
             size: written,
@@ -1091,8 +1097,9 @@ pub fn extract_zip_stream<R: Read>(
 fn extract_store_with_data_descriptor<R: Read, W: Write>(
     r: &mut PeekableReader<R>,
     writer: &mut W,
-    sha: &mut Sha256,
+    sha: &mut DigestContext,
     dd_buf: &mut [u8],
+    dd_finder: &memmem::Finder<'_>,
     control: &DownloadControl,
 ) -> TransferResult<u64> {
     let mut crc = Crc32::new();
@@ -1118,7 +1125,7 @@ fn extract_store_with_data_descriptor<R: Read, W: Write>(
             ));
         }
 
-        if let Some(pos) = find_subslice(&dd_buf[..len], &DATA_DESCRIPTOR_SIG) {
+        if let Some(pos) = dd_finder.find(&dd_buf[..len]) {
             if pos > 0 {
                 let data = &dd_buf[..pos];
                 writer.write_all(data)?;
@@ -1185,10 +1192,6 @@ fn extract_store_with_data_descriptor<R: Read, W: Write>(
             len -= safe_len;
         }
     }
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8; 4]) -> Option<usize> {
-    haystack.windows(4).position(|w| w == needle)
 }
 
 fn parse_zip64_extra(extra: &[u8], uncomp_size: &mut u64, comp_size: &mut u64) -> bool {
@@ -1382,9 +1385,15 @@ mod tests {
 
         assert_eq!(extracted.len(), 2);
         assert_eq!(extracted[0].size, big.len() as u64);
-        assert_eq!(extracted[0].sha256, hex::encode(Sha256::digest(&big)));
+        assert_eq!(
+            extracted[0].sha256,
+            hex::encode(ring::digest::digest(&SHA256, &big).as_ref())
+        );
         assert_eq!(extracted[1].size, tail.len() as u64);
-        assert_eq!(extracted[1].sha256, hex::encode(Sha256::digest(&tail)));
+        assert_eq!(
+            extracted[1].sha256,
+            hex::encode(ring::digest::digest(&SHA256, &tail).as_ref())
+        );
         assert_eq!(ctrl.snapshot().files_extracted, 2);
         assert_eq!(fs::read(dir.path().join("big.bin")).unwrap(), big);
         assert_eq!(fs::read(dir.path().join("tail.txt")).unwrap(), tail);
