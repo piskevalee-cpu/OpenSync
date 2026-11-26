@@ -230,7 +230,7 @@
   });
 
   // Fetch latest release assets from GitHub (fallback to DEFAULT_RELEASE_TAG if offline/rate-limited)
-  const DEFAULT_RELEASE_TAG = 'v0.4.2';
+  const DEFAULT_RELEASE_TAG = 'v0.4.3';
   let activeReleaseTag = DEFAULT_RELEASE_TAG;
   const LATEST_RELEASE_API = 'https://api.github.com/repos/piskevalee-cpu/OpenSync/releases/latest';
   const RELEASES_LIST_API = 'https://api.github.com/repos/piskevalee-cpu/OpenSync/releases?per_page=5';
@@ -239,35 +239,35 @@
       suffix: 'amd64.flatpak',
       heroLabel: 'Download for Linux',
       proposal: 'Detected Linux · Flatpak recommended (Appimage also available)',
-      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.2/OpenSync_Launcher_0.4.2_amd64.flatpak',
+      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.3/OpenSync_Launcher_0.4.3_amd64.flatpak',
       cmd: (url) => `curl -fSL ${url} -o /tmp/opensync.flatpak && flatpak install --user -y /tmp/opensync.flatpak && flatpak run io.opensync.launcher`,
     },
     appimage: {
       suffix: 'amd64.AppImage',
       heroLabel: 'Download for Linux',
       proposal: 'Detected Linux · Portable AppImage',
-      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.2/OpenSync_Launcher_0.4.2_amd64.AppImage',
+      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.3/OpenSync_Launcher_0.4.3_amd64.AppImage',
       cmd: (url) => `curl -fSL ${url} -o OpenSync_Launcher.AppImage && chmod +x OpenSync_Launcher.AppImage && ./OpenSync_Launcher.AppImage`,
     },
     windows: {
       suffix: 'x64.exe',
       heroLabel: 'Download for Windows',
       proposal: 'Detected Windows · x64 installer recommended',
-      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.2/OpenSync_Launcher_0.4.2_x64.exe',
+      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.3/OpenSync_Launcher_0.4.3_x64.exe',
       cmd: (url) => `irm ${url} -OutFile OpenSync_Launcher.exe; .\\OpenSync_Launcher.exe`,
     },
     'macos-arm64': {
       suffix: 'aarch64.dmg',
       heroLabel: 'Download for macOS',
       proposal: 'Detected macOS (Apple Silicon) · .dmg recommended',
-      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.2/OpenSync_Launcher_0.4.2_aarch64.dmg',
+      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.3/OpenSync_Launcher_0.4.3_aarch64.dmg',
       cmd: (url) => `curl -fSL ${url} -o ~/Downloads/OpenSync_Launcher.dmg && open ~/Downloads/OpenSync_Launcher.dmg`,
     },
     'macos-x64': {
       suffix: 'x86_64.dmg',
       heroLabel: 'Download for macOS (Intel)',
       proposal: 'Detected macOS (Intel) · .dmg recommended',
-      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.2/OpenSync_Launcher_0.4.2_x86_64.dmg',
+      url: 'https://github.com/piskevalee-cpu/OpenSync/releases/download/v0.4.3/OpenSync_Launcher_0.4.3_x86_64.dmg',
       cmd: (url) => `curl -fSL ${url} -o ~/Downloads/OpenSync_Launcher.dmg && open ~/Downloads/OpenSync_Launcher.dmg`,
     },
   };
