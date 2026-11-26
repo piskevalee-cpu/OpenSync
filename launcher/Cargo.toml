@@ -21,7 +21,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.4.3"
+version = "0.4.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/piskevalee-cpu/OpenSync"

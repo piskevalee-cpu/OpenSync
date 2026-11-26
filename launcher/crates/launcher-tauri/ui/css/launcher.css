@@ -102,7 +102,7 @@ body {
 
 body {
   position: relative;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 /* Color-only ambient backdrop extracted from cover art (fades in on Library card hover and Game Detail). */
@@ -244,7 +244,9 @@ body.is-auth-screen .shell {
   align-items: center;
   gap: 24px;
   min-height: 60px;
-  padding: 10px 0;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  padding: 10px max(24px, calc(50vw - 600px));
   margin-bottom: 28px;
   border-bottom: 1px solid var(--hairline);
   background: var(--canvas);
@@ -282,8 +284,7 @@ body.is-scrolled .topbar {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  flex: 1;
-  min-width: 0;
+  flex: 1 0 auto;
 }
 
 .nav a {
@@ -363,6 +364,74 @@ body.is-scrolled .topbar {
   flex-shrink: 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+@media (max-width: 1080px) {
+  .topbar {
+    gap: 14px;
+  }
+
+  .nav a {
+    padding: 7px 10px;
+  }
+
+  .topbar-user,
+  .status-right {
+    gap: 6px;
+  }
+
+  .status-pill,
+  .activity-trigger {
+    padding: 5px 10px;
+  }
+
+  .profile-trigger-sub {
+    display: none;
+  }
+}
+
+@media (max-width: 920px) {
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    gap: 10px;
+    height: auto;
+  }
+
+  .logo img {
+    height: 26px;
+  }
+
+  .nav {
+    justify-content: flex-end;
+  }
+
+  .nav a {
+    padding: 6px 9px;
+    font-size: 13px;
+  }
+
+  .topbar-user {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .profile-trigger {
+    padding: 4px 10px 4px 5px;
+    gap: 6px;
+  }
+}
+
+@media (max-width: 760px) {
+  .topbar {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .shell {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 
 .status-right {
@@ -1780,6 +1849,55 @@ textarea.input {
 }
 
 /* Per-game launch options (prefix, arguments, environment) */
+.launch-advanced {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.launch-advanced-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--muted);
+  transition: color 0.15s var(--ease);
+}
+
+.launch-advanced-summary::-webkit-details-marker {
+  display: none;
+}
+
+.launch-advanced-summary:hover {
+  color: var(--fg);
+}
+
+.launch-advanced-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.launch-advanced-chevron {
+  display: inline-flex;
+  transform: rotate(-90deg);
+  transition: transform 0.2s var(--ease);
+}
+
+.launch-advanced[open] .launch-advanced-chevron {
+  transform: rotate(0deg);
+}
+
+.launch-advanced-body {
+  padding-top: 12px;
+}
+
 .launch-path-row {
   display: flex;
   align-items: center;
@@ -1793,7 +1911,6 @@ textarea.input {
 
 .launch-path-row .btn {
   flex: 0 0 auto;
-  height: 38px;
 }
 
 .env-var-list {
@@ -1816,6 +1933,17 @@ textarea.input {
   font-size: 12px;
 }
 
+@media (max-width: 680px) {
+  .env-var-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .env-var-row .env-var-value {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+}
+
 .env-var-add {
   align-self: flex-start;
 }
@@ -1825,7 +1953,19 @@ textarea.input {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-top: 4px;
+  margin-top: 12px;
+}
+
+.launch-dirty-hint {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--warn);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launch-advanced-chevron {
+    transition: none;
+  }
 }
 
 /* ---------- Download manager ---------- */

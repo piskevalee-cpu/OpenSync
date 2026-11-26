@@ -23,8 +23,8 @@ use opensync_transfer::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
@@ -477,30 +477,49 @@ impl LauncherCore {
         &self.paths
     }
 
-    /// Log file a game's stdout/stderr is captured into for this profile-independent game id.
-    pub fn game_log_path(&self, game_id: i64) -> PathBuf {
-        self.paths.logs_dir.join(format!("{game_id}.log"))
+    /// Log file a game's stdout/stderr is captured into, scoped by profile so two
+    /// servers sharing the same numeric `game_id` never mix logs.
+    pub fn game_log_path(&self, profile_id: &str, game_id: i64) -> PathBuf {
+        let dir = safe_cache_component(profile_id);
+        let seg = if dir.is_empty() { "default" } else { dir.as_str() };
+        self.paths.logs_dir.join(seg).join(format!("{game_id}.log"))
     }
 
-    /// Reads the tail of a game's captured output, trimming a partial first line.
-    pub fn read_game_log(&self, game_id: i64, max_bytes: usize) -> CoreResult<Option<String>> {
-        let path = self.game_log_path(game_id);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+    /// Reads at most the trailing `max_bytes` (capped at 512 KiB) of a game's captured
+    /// output without loading the whole file into memory, trimming a partial first line.
+    pub fn read_game_log(
+        &self,
+        profile_id: &str,
+        game_id: i64,
+        max_bytes: usize,
+    ) -> CoreResult<Option<String>> {
+        const MAX_TAIL_BYTES: usize = 512 * 1024;
+        let cap = max_bytes.clamp(1, MAX_TAIL_BYTES);
+        let path = self.game_log_path(profile_id, game_id);
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err.into()),
         };
-        let mut start = bytes.len().saturating_sub(max_bytes);
-        if start > 0
-            && let Some(offset) = bytes[start..].iter().position(|b| *b == b'\n')
+        let len = file.metadata()?.len();
+        let truncated = len > cap as u64;
+        let to_read = if truncated { cap } else { len as usize };
+        if truncated {
+            file.seek(SeekFrom::End(-(cap as i64)))?;
+        }
+        let mut bytes = Vec::with_capacity(to_read);
+        file.take(to_read as u64).read_to_end(&mut bytes)?;
+        let mut start = 0;
+        if truncated
+            && let Some(offset) = bytes.iter().position(|b| *b == b'\n')
         {
-            start += offset + 1;
+            start = offset + 1;
         }
         Ok(Some(String::from_utf8_lossy(&bytes[start..]).into_owned()))
     }
 
-    pub fn clear_game_log(&self, game_id: i64) -> CoreResult<()> {
-        match std::fs::remove_file(self.game_log_path(game_id)) {
+    pub fn clear_game_log(&self, profile_id: &str, game_id: i64) -> CoreResult<()> {
+        match std::fs::remove_file(self.game_log_path(profile_id, game_id)) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err.into()),
@@ -777,6 +796,12 @@ impl LauncherCore {
             tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&profile_lib_dir))
                 .await
                 .map_err(|e| std::io::Error::other(format!("cleanup task panicked: {e}")))??;
+        }
+
+        let profile_log_dir = self.paths.logs_dir.join(safe_cache_component(profile_id));
+        if profile_log_dir.is_dir() {
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&profile_log_dir))
+                .await;
         }
 
         // Best-effort cleanup of cached covers and avatars belonging to this profile.
@@ -2466,23 +2491,30 @@ impl LauncherCore {
     }
 
     /// Atomically saves the custom prefix, launch arguments and environment variables for a
-    /// game. Empty values clear the override and restore automatic behaviour. This works for
-    /// games that are still in the library but not yet installed.
+    /// game and returns the normalized configuration. Empty values clear the override and
+    /// restore automatic behaviour. This works for games that are still in the library but
+    /// not yet installed.
     pub async fn set_game_launch_config(
         &self,
         game_id: i64,
         wine_prefix: Option<String>,
         launch_args: Option<String>,
         env_vars: Vec<GameEnvVar>,
-    ) -> CoreResult<()> {
+    ) -> CoreResult<GameLaunchConfig> {
         let profile = self
             .active_profile()
             .await
             .ok_or(CoreError::NoActiveProfile)?;
 
+        if wine_prefix.as_deref().is_some_and(|raw| raw.contains('\0')) {
+            return Err(CoreError::InvalidLaunchOption(
+                "Wine prefix path cannot contain NUL bytes".to_string(),
+            ));
+        }
+
         let prefix = wine_prefix.and_then(|raw| {
             let trimmed = raw.trim();
-            if trimmed.is_empty() || trimmed.contains('\0') {
+            if trimmed.is_empty() {
                 return None;
             }
             let home = std::env::var("HOME")
@@ -2516,6 +2548,11 @@ impl LauncherCore {
             Some(absolute.to_string_lossy().into_owned())
         });
 
+        if launch_args.as_deref().is_some_and(|raw| raw.contains('\0')) {
+            return Err(CoreError::InvalidLaunchOption(
+                "launch arguments cannot contain NUL bytes".to_string(),
+            ));
+        }
         let args = launch_args.and_then(|raw| {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -2533,7 +2570,11 @@ impl LauncherCore {
         let mut clean_vars: Vec<GameEnvVar> = Vec::new();
         for var in env_vars {
             let key = var.key.trim();
-            let value = var.value.trim();
+            if var.value.contains('\0') {
+                return Err(CoreError::InvalidLaunchOption(format!(
+                    "value for {key:?} cannot contain NUL bytes"
+                )));
+            }
             let valid_key = !key.is_empty()
                 && key.len() <= 256
                 && key.chars().enumerate().all(|(i, c)| {
@@ -2548,17 +2589,17 @@ impl LauncherCore {
                     "invalid environment variable name: {key:?} (use A-Z, 0-9 and _, not starting with a digit)"
                 )));
             }
-            if value.len() > 8192 {
+            if var.value.len() > 8192 {
                 return Err(CoreError::InvalidLaunchOption(format!(
                     "value for {key} is too long (8192 character limit)"
                 )));
             }
             if let Some(existing) = clean_vars.iter_mut().find(|v| v.key == key) {
-                existing.value = value.to_string();
+                existing.value = var.value;
             } else {
                 clean_vars.push(GameEnvVar {
                     key: key.to_string(),
-                    value: value.to_string(),
+                    value: var.value,
                 });
             }
         }
@@ -2568,14 +2609,15 @@ impl LauncherCore {
             ));
         }
 
-        self.db.upsert_game_launch_config(&GameLaunchConfig {
+        let normalized = GameLaunchConfig {
             profile_id: profile.id,
             game_id,
             wine_prefix: prefix,
             launch_args: args,
             env_vars: clean_vars,
-        })?;
-        Ok(())
+        };
+        self.db.upsert_game_launch_config(&normalized)?;
+        Ok(normalized)
     }
 
     /// Lists all pending offline save syncs queued for the active profile.
@@ -2914,7 +2956,7 @@ impl LauncherCore {
                 .map(|var| (var.key.clone(), var.value.clone())),
         );
         if options.log_path.is_none() {
-            options.log_path = Some(self.game_log_path(game_id));
+            options.log_path = Some(self.game_log_path(&profile.id, game_id));
         }
         let proton_list = self.detect_proton();
         let chosen_proton = installed

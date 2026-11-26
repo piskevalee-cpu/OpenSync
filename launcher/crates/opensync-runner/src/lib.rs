@@ -380,7 +380,7 @@ where
                 fs::create_dir_all(parent)?;
             }
             let header = format!(
-                "\n===== {} · {} · runtime: {} =====\n",
+                "\n===== {} · {} · runtime: {} =====",
                 started_at.to_rfc3339(),
                 game.name,
                 spec.runtime_label

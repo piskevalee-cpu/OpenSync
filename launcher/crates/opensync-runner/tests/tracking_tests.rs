@@ -136,6 +136,27 @@ async fn launch_captures_stdout_and_stderr_and_applies_extra_env() {
     assert!(log.contains("CUSTOM=hello"), "unexpected log: {log}");
     assert!(log.contains("ERROR_LINE=1"), "unexpected log: {log}");
     assert!(log.contains("runtime: native"), "unexpected log: {log}");
+
+    // Oversized logs (> 5 MB) rotate to .old.log on the next launch.
+    fs::write(&log_path, vec![b'x'; 5 * 1024 * 1024 + 64]).unwrap();
+    launch_and_track(
+        &db,
+        None,
+        &installed,
+        None,
+        LaunchOptions {
+            auto_sync_on_close: false,
+            sync_settle_delay: Duration::ZERO,
+            heartbeat_interval: Duration::from_millis(50),
+            log_path: Some(log_path.clone()),
+            ..LaunchOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let rotated = log_path.with_extension("old.log");
+    assert!(rotated.is_file(), "expected rotated old log at {rotated:?}");
+    assert!(fs::metadata(&log_path).unwrap().len() < 4096);
 }
 
 #[test]

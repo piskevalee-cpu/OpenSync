@@ -34,34 +34,33 @@ async fn launch_config_can_be_saved_before_install_and_is_validated() {
     let profile_id = core.active_profile().await.unwrap().id;
 
     // The game is in the library but has not been downloaded yet.
-    core.set_game_launch_config(
-        31,
-        Some("~/prefixes/configurable".to_string()),
-        Some("--windowed --save-dir=\"my saves\"".to_string()),
-        vec![GameEnvVar {
-            key: "DXVK_HUD".to_string(),
-            value: "full".to_string(),
-        }],
-    )
-    .await
-    .unwrap();
+    let returned = core
+        .set_game_launch_config(
+            31,
+            Some("~/prefixes/configurable".to_string()),
+            Some("--windowed --save-dir=\"my saves\"".to_string()),
+            vec![GameEnvVar {
+                key: "DXVK_HUD".to_string(),
+                value: " full ".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(
+        returned
+            .wine_prefix
+            .as_deref()
+            .unwrap()
+            .ends_with("prefixes/configurable")
+    );
+    assert_eq!(returned.env_vars[0].value, " full ");
 
     let saved = core
         .db()
         .get_game_launch_config(&profile_id, 31)
         .unwrap()
         .expect("config should be saved before install");
-    assert!(
-        saved
-            .wine_prefix
-            .unwrap()
-            .ends_with("prefixes/configurable")
-    );
-    assert_eq!(
-        saved.launch_args.as_deref(),
-        Some("--windowed --save-dir=\"my saves\"")
-    );
-    assert_eq!(saved.env_vars.len(), 1);
+    assert_eq!(saved, returned);
     assert!(
         core.db()
             .get_installed_game(&profile_id, 31)
@@ -82,6 +81,30 @@ async fn launch_config_can_be_saved_before_install_and_is_validated() {
         .await
         .unwrap_err();
     assert!(matches!(err, CoreError::InvalidLaunchOption(_)), "{err:?}");
+
+    // Embedded NUL bytes must be explicitly rejected in prefix, args, and env values.
+    for (prefix, args, val) in [
+        (Some("/tmp/bad\0prefix".to_string()), None, "ok"),
+        (None, Some("--bad\0arg".to_string()), "ok"),
+        (None, None, "bad\0val"),
+    ] {
+        let nul_err = core
+            .set_game_launch_config(
+                31,
+                prefix,
+                args,
+                vec![GameEnvVar {
+                    key: "VALID_KEY".to_string(),
+                    value: val.to_string(),
+                }],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(nul_err, CoreError::InvalidLaunchOption(_)),
+            "{nul_err:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -146,9 +169,34 @@ async fn launch_applies_args_env_and_captures_output() {
     assert_eq!(env_value.trim(), "from-config");
 
     let log = core
-        .read_game_log(31, 64 * 1024)
+        .read_game_log(&profile_id, 31, 64 * 1024)
         .unwrap()
         .expect("a game log should exist after launch");
     assert!(log.contains("STDOUT_MARKER"), "{log}");
     assert!(log.contains("STDERR_MARKER"), "{log}");
+
+    // Another profile sharing the same game_id has its own isolated log file.
+    assert!(core.read_game_log("other-profile", 31, 64 * 1024).unwrap().is_none());
+
+    core.clear_game_log(&profile_id, 31).unwrap();
+    assert!(core.read_game_log(&profile_id, 31, 64 * 1024).unwrap().is_none());
+}
+
+#[test]
+fn read_game_log_seeks_tail_and_drops_partial_first_line() {
+    let dir = tempdir().unwrap();
+    let core = test_core(dir.path());
+    let log_path = core.game_log_path("prof-a", 99);
+    fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+
+    let mut content = String::new();
+    for i in 0..2000 {
+        content.push_str(&format!("line-{i:04}-payload-text\n"));
+    }
+    fs::write(&log_path, &content).unwrap();
+
+    let tail = core.read_game_log("prof-a", 99, 256).unwrap().unwrap();
+    assert!(tail.len() <= 256, "tail exceeded cap: {}", tail.len());
+    assert!(tail.starts_with("line-"), "expected partial line trimmed, got: {tail:?}");
+    assert!(tail.contains("line-1999-payload-text"), "{tail}");
 }

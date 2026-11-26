@@ -505,16 +505,17 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
         return Ok(Vec::new());
     };
 
-    let core_for_playtime = Arc::clone(&state.core);
+    let core_for_db = Arc::clone(&state.core);
     let profile_id = profile.id.clone();
-    let (remote_res, installed_res, pending_res, playtime_res) = tokio::join!(
+    let (remote_res, installed_res, pending_res, db_meta_res) = tokio::join!(
         state.core.fetch_remote_games(),
         state.core.list_downloaded_games(),
         state.core.list_pending_syncs(),
         tokio::task::spawn_blocking(move || {
-            core_for_playtime
-                .db()
-                .playtime_summaries_for_profile(&profile_id)
+            let db = core_for_db.db();
+            let playtime = db.playtime_summaries_for_profile(&profile_id);
+            let configs = db.list_game_launch_configs(&profile_id);
+            (playtime, configs)
         }),
     );
 
@@ -525,12 +526,11 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
         .into_iter()
         .map(|p| p.game_id)
         .collect();
-    let playtime_map = playtime_res.ok().and_then(|r| r.ok()).unwrap_or_default();
-    let config_map: HashMap<i64, GameLaunchConfig> = state
-        .core
-        .db()
-        .list_game_launch_configs(&profile.id)
-        .unwrap_or_default()
+    let (playtime_map, config_list) = match db_meta_res {
+        Ok((playtime, configs)) => (playtime.unwrap_or_default(), configs.unwrap_or_default()),
+        Err(_) => (HashMap::new(), Vec::new()),
+    };
+    let config_map: HashMap<i64, GameLaunchConfig> = config_list
         .into_iter()
         .map(|config| (config.game_id, config))
         .collect();
@@ -950,7 +950,7 @@ pub async fn set_game_launch_config(
     state: State<'_, AppState>,
     game_id: i64,
     config: GameLaunchConfigInput,
-) -> Result<bool, String> {
+) -> Result<GameLaunchConfig, String> {
     state
         .core
         .set_game_launch_config(
@@ -960,8 +960,7 @@ pub async fn set_game_launch_config(
             config.env_vars,
         )
         .await
-        .map_err(err_str)?;
-    Ok(true)
+        .map_err(err_str)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1005,7 +1004,7 @@ pub async fn change_username(
 
 /// Opens a native directory picker using whichever desktop dialog tool is installed.
 /// Returns `None` when the dialog is unavailable or the user cancels.
-fn pick_directory(prompt: &str) -> Option<String> {
+fn pick_directory(prompt: &'static str) -> Option<String> {
     fn try_dialog(program: &str, args: &[&str]) -> Option<String> {
         let output = std::process::Command::new(program)
             .args(args)
@@ -1324,8 +1323,14 @@ pub async fn get_game_log(
     game_id: i64,
     max_bytes: Option<usize>,
 ) -> Result<Option<String>, String> {
+    let profile = state
+        .core
+        .active_profile()
+        .await
+        .ok_or_else(|| "no active profile".to_string())?;
     let core = Arc::clone(&state.core);
-    tokio::task::spawn_blocking(move || core.read_game_log(game_id, max_bytes.unwrap_or(64 * 1024)))
+    let capped = max_bytes.unwrap_or(64 * 1024).min(512 * 1024);
+    tokio::task::spawn_blocking(move || core.read_game_log(&profile.id, game_id, capped))
         .await
         .map_err(|e| format!("log read failed: {e}"))?
         .map_err(err_str)
@@ -1333,7 +1338,15 @@ pub async fn get_game_log(
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn clear_game_log(state: State<'_, AppState>, game_id: i64) -> Result<bool, String> {
-    state.core.clear_game_log(game_id).map_err(err_str)?;
+    let profile = state
+        .core
+        .active_profile()
+        .await
+        .ok_or_else(|| "no active profile".to_string())?;
+    state
+        .core
+        .clear_game_log(&profile.id, game_id)
+        .map_err(err_str)?;
     Ok(true)
 }
 

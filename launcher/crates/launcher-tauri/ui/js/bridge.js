@@ -1225,15 +1225,42 @@ function createMockRuntime() {
           const g = games.find((x) => x.game_id === args.game_id);
           if (!g) throw new Error('Game not found');
           const config = args.config || {};
+          if ((config.wine_prefix || '').includes('\0')) {
+            throw new Error('Wine prefix path cannot contain NUL bytes');
+          }
+          if ((config.launch_args || '').includes('\0')) {
+            throw new Error('Launch arguments cannot contain NUL bytes');
+          }
+          const normalizedEnv = [];
           for (const v of config.env_vars || []) {
-            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(v.key || '')) {
+            const key = (v.key || '').trim();
+            const value = String(v.value ?? '');
+            if (value.includes('\0')) {
+              throw new Error(`Value for ${key} cannot contain NUL bytes`);
+            }
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
               throw new Error(`Invalid environment variable name: ${v.key}`);
             }
+            const existing = normalizedEnv.find((e) => e.key === key);
+            if (existing) existing.value = value;
+            else normalizedEnv.push({ key, value });
           }
-          g.wine_prefix = config.wine_prefix || null;
-          g.launch_args = config.launch_args || null;
-          g.env_vars = (config.env_vars || []).map((v) => ({ key: v.key, value: v.value }));
-          return true;
+          const rawPrefix = (config.wine_prefix || '').trim();
+          const expandedPrefix = rawPrefix === '~'
+            ? '/home/valerio'
+            : rawPrefix.startsWith('~/')
+              ? `/home/valerio/${rawPrefix.slice(2)}`
+              : rawPrefix;
+          g.wine_prefix = expandedPrefix || null;
+          g.launch_args = (config.launch_args || '').trim() || null;
+          g.env_vars = normalizedEnv;
+          return {
+            profile_id: activeProfileId || 'prof-home-lan',
+            game_id: g.game_id,
+            wine_prefix: g.wine_prefix,
+            launch_args: g.launch_args,
+            env_vars: g.env_vars,
+          };
         }
 
         case 'pick_wine_prefix_dir': {

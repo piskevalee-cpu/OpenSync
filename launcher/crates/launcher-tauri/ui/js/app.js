@@ -2541,31 +2541,40 @@ function renderGameDetailView() {
           <label>Launch executable</label>
           <div id="detail-exe-host"></div>
         </div>
-        <div class="field">
-          <label>Wine prefix</label>
-          <div class="launch-path-row">
-            <input class="input" id="detail-prefix-input" type="text" spellcheck="false"
-              value="${esc(g.wine_prefix || '')}"
-              placeholder="Automatic (per-game prefix)" aria-label="Wine prefix directory" />
-            <button type="button" class="btn" id="btn-detail-browse-prefix" title="Choose a prefix folder">${icon('folder', 14)}<span>Browse</span></button>
+        <details class="launch-advanced" id="detail-launch-advanced"${g.wine_prefix || g.launch_args || (g.env_vars && g.env_vars.length) ? ' open' : ''}>
+          <summary class="launch-advanced-summary">
+            <span class="launch-advanced-chevron" aria-hidden="true">${icon('chevron-down', 14)}</span>
+            <span>Advanced launch options</span>
+          </summary>
+          <div class="launch-advanced-body">
+            <div class="field">
+              <label for="detail-prefix-input">Wine prefix</label>
+              <div class="launch-path-row">
+                <input class="input" id="detail-prefix-input" type="text" spellcheck="false"
+                  value="${esc(g.wine_prefix || '')}"
+                  placeholder="Automatic (per-game prefix)" />
+                <button type="button" class="btn" id="btn-detail-browse-prefix" title="Choose a prefix folder">${icon('folder', 14)}<span>Browse</span></button>
+              </div>
+              <span class="small faint">Leave blank to use the automatic per-game prefix.</span>
+            </div>
+            <div class="field">
+              <label for="detail-args-input">Game arguments</label>
+              <input class="input" id="detail-args-input" type="text" spellcheck="false"
+                value="${esc(g.launch_args || '')}"
+                placeholder="-windowed --save-dir=&quot;my saves&quot;" />
+              <span class="small faint">Quotes keep spaces together in a single argument.</span>
+            </div>
+            <div class="field" style="margin-bottom:0;">
+              <label>Environment variables</label>
+              <div class="env-var-list" id="detail-env-rows"></div>
+              <button type="button" class="btn btn-ghost btn-sm env-var-add" id="btn-detail-add-env">${icon('plus', 14)}<span>Add variable</span></button>
+            </div>
           </div>
-          <span class="small faint">Leave blank to use the automatic per-game prefix.</span>
-        </div>
-        <div class="field">
-          <label>Game arguments</label>
-          <input class="input" id="detail-args-input" type="text" spellcheck="false"
-            value="${esc(g.launch_args || '')}"
-            placeholder="-windowed --save-dir=&quot;my saves&quot;" aria-label="Game launch arguments" />
-          <span class="small faint">Quotes keep spaces together in a single argument.</span>
-        </div>
-        <div class="field">
-          <label>Environment variables</label>
-          <div class="env-var-list" id="detail-env-rows"></div>
-          <button type="button" class="btn btn-ghost btn-sm env-var-add" id="btn-detail-add-env">${icon('plus', 14)}<span>Add variable</span></button>
-        </div>
+        </details>
         <div class="launch-actions-row">
           <button type="button" class="btn btn-primary btn-sm" id="btn-detail-save-launch">${icon('check', 14)}<span>Save launch options</span></button>
           <button type="button" class="btn btn-sm" id="btn-detail-show-logs">${icon('hard-drive', 14)}<span>Show logs</span></button>
+          <span class="launch-dirty-hint" id="detail-launch-dirty" hidden>Unsaved changes</span>
         </div>
       </section>
 
@@ -2685,6 +2694,10 @@ function renderGameDetailView() {
   document.getElementById('detail-exe-host')?.appendChild(exeSelect.element);
 
   const envRowsHost = document.getElementById('detail-env-rows');
+  const dirtyHint = document.getElementById('detail-launch-dirty');
+  const setLaunchDirty = (dirty) => {
+    if (dirtyHint) dirtyHint.hidden = !dirty;
+  };
   const appendEnvVarRow = (entry = { key: '', value: '' }) => {
     if (!envRowsHost) return null;
     const row = document.createElement('div');
@@ -2696,14 +2709,25 @@ function renderGameDetailView() {
         placeholder="value" value="${esc(entry.value)}" />
       <button type="button" class="btn btn-ghost btn-icon env-var-remove" aria-label="Remove variable" title="Remove variable">${icon('x', 14)}</button>
     `;
-    row.querySelector('.env-var-remove')?.addEventListener('click', () => row.remove());
+    row.querySelector('.env-var-key')?.addEventListener('input', () => setLaunchDirty(true));
+    row.querySelector('.env-var-value')?.addEventListener('input', () => setLaunchDirty(true));
+    row.querySelector('.env-var-remove')?.addEventListener('click', () => {
+      row.remove();
+      setLaunchDirty(true);
+    });
     envRowsHost.appendChild(row);
     return row;
   };
   (g.env_vars || []).forEach((entry) => appendEnvVarRow(entry));
 
+  document.getElementById('detail-prefix-input')?.addEventListener('input', () => setLaunchDirty(true));
+  document.getElementById('detail-args-input')?.addEventListener('input', () => setLaunchDirty(true));
+
   document.getElementById('btn-detail-add-env')?.addEventListener('click', () => {
+    const details = document.getElementById('detail-launch-advanced');
+    if (details) details.open = true;
     const row = appendEnvVarRow();
+    setLaunchDirty(true);
     row?.querySelector('.env-var-key')?.focus();
   });
 
@@ -2713,6 +2737,7 @@ function renderGameDetailView() {
       if (picked) {
         const input = document.getElementById('detail-prefix-input');
         if (input) input.value = picked;
+        setLaunchDirty(true);
       }
     } catch (err) {
       showToast(String(err?.message || err), 'danger', 'alert-triangle');
@@ -2727,7 +2752,7 @@ function renderGameDetailView() {
         key: row.querySelector('.env-var-key')?.value || '',
         value: row.querySelector('.env-var-value')?.value || '',
       }))
-      .filter((v) => v.key.trim() || v.value.trim());
+      .filter((v) => v.key.trim() || v.value.length > 0);
     const invalid = envVars.find(
       (v) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v.key.trim()),
     );
@@ -2742,14 +2767,21 @@ function renderGameDetailView() {
     const prefix = prefixInput?.value || '';
     const args = argsInput?.value || '';
     try {
-      await bridge.setGameLaunchConfig(g.game_id, {
+      const saved = await bridge.setGameLaunchConfig(g.game_id, {
         wine_prefix: prefix,
         launch_args: args,
         env_vars: envVars,
       });
-      g.wine_prefix = prefix.trim() || null;
-      g.launch_args = args.trim() || null;
-      g.env_vars = envVars;
+      g.wine_prefix = saved?.wine_prefix ?? (prefix.trim() || null);
+      g.launch_args = saved?.launch_args ?? (args.trim() || null);
+      g.env_vars = saved?.env_vars ?? envVars;
+      if (prefixInput) prefixInput.value = g.wine_prefix || '';
+      if (argsInput) argsInput.value = g.launch_args || '';
+      if (envRowsHost) {
+        envRowsHost.innerHTML = '';
+        (g.env_vars || []).forEach((entry) => appendEnvVarRow(entry));
+      }
+      setLaunchDirty(false);
       showToast('Launch options saved', 'accent', 'check');
     } catch (err) {
       showToast(String(err?.message || err), 'danger', 'alert-triangle');
@@ -4614,6 +4646,7 @@ function openGameLogsModal(game) {
   document.getElementById('game-logs-modal-bg')?.addEventListener('click', (e) => {
     if (e.target.id === 'game-logs-modal-bg') closeModal();
   });
+  document.getElementById('game-logs-close-x')?.focus();
   document.getElementById('btn-game-log-refresh')?.addEventListener('click', async () => {
     await loadOutput();
     try {
