@@ -3,15 +3,161 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use launcher_db::{InstalledGame, LauncherDb};
 use opensync_proton::{
-    BinaryKind, ProtonError, ProtonSource, build_launch_command, detect_binary_kind,
-    detect_proton_in_roots, discover_executables, install_ge_proton_archive,
+    BinaryKind, ProtonError, ProtonInstallation, ProtonSource, build_launch_command,
+    detect_binary_kind, detect_proton_in_roots, discover_executables, install_ge_proton_archive,
 };
-use opensync_runner::{LaunchOptions, PostExitSyncStatus, SessionClock, launch_and_track};
+use opensync_runner::{
+    LaunchOptions, PostExitSyncStatus, SessionClock, launch_and_track, parse_launch_args,
+    resolve_launch_command,
+};
 use sha2::{Digest, Sha512};
 use std::fs;
 use std::time::Duration;
 use tar::Builder;
 use tempfile::tempdir;
+
+#[test]
+fn parse_launch_args_supports_quotes_and_escapes() {
+    assert_eq!(
+        parse_launch_args("-windowed --save-dir=\"my saves\" --name='Cyber Runner' plain"),
+        vec![
+            "-windowed",
+            "--save-dir=my saves",
+            "--name=Cyber Runner",
+            "plain",
+        ]
+    );
+    assert_eq!(parse_launch_args("   "), Vec::<String>::new());
+    assert_eq!(
+        parse_launch_args(r#"--path="C:\\Games\\My Game""#),
+        vec!["--path=C:\\Games\\My Game"]
+    );
+}
+
+#[test]
+fn custom_prefix_and_args_are_used_in_launch_command() {
+    let dir = tempdir().unwrap();
+    let exe_dir = dir.path().join("game");
+    fs::create_dir_all(&exe_dir).unwrap();
+    let exe_path = exe_dir.join("game.exe");
+    // A minimal PE header is enough for binary-kind detection.
+    fs::write(&exe_path, b"MZ\x90\x00").unwrap();
+
+    let game = InstalledGame {
+        profile_id: "p1".to_string(),
+        game_id: 7,
+        name: "Game".to_string(),
+        slug: "game".to_string(),
+        install_dir: exe_dir.clone(),
+        executable_rel_path: Some("game.exe".to_string()),
+        manifest_hash: None,
+        total_size: 0,
+        installed_at: Utc::now(),
+        last_synced_at: None,
+        proton_override: None,
+    };
+    let proton = ProtonInstallation {
+        name: "Proton Test".to_string(),
+        root_dir: dir.path().join("proton"),
+        proton_script: dir.path().join("proton/proton"),
+        source: ProtonSource::Custom,
+    };
+    let custom_prefix = dir.path().join("my-prefix");
+    let args = parse_launch_args("--windowed --save-dir=\"my saves\"");
+    let spec = resolve_launch_command(
+        &game,
+        Some(&proton),
+        &dir.path().join("prefixes"),
+        &args,
+        Some(&custom_prefix),
+    )
+    .unwrap();
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(spec.env.iter().any(
+            |(k, v)| k == "STEAM_COMPAT_DATA_PATH" && v == &custom_prefix.to_string_lossy()
+        ));
+        assert!(spec.args.contains(&"--windowed".to_string()));
+        assert!(spec.args.contains(&"--save-dir=my saves".to_string()));
+    }
+    #[cfg(target_os = "macos")]
+    let _ = spec;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn launch_captures_stdout_and_stderr_and_applies_extra_env() {
+    let dir = tempdir().unwrap();
+    let db = LauncherDb::open_in_memory().unwrap();
+    let profile = db
+        .upsert_profile("LAN", "http://127.0.0.1:3000", "valerio", 1, "admin")
+        .unwrap();
+    let game_dir = dir.path().join("game");
+    fs::create_dir_all(&game_dir).unwrap();
+    let script = game_dir.join("game.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\necho \"CUSTOM=$OPENSYNC_TEST_VAR\"\necho \"ERROR_LINE=1\" >&2\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let installed = InstalledGame {
+        profile_id: profile.id.clone(),
+        game_id: 12,
+        name: "Logged Game".to_string(),
+        slug: "logged-game".to_string(),
+        install_dir: game_dir.clone(),
+        executable_rel_path: Some("game.sh".to_string()),
+        manifest_hash: None,
+        total_size: 0,
+        installed_at: Utc::now(),
+        last_synced_at: None,
+        proton_override: None,
+    };
+    db.upsert_installed_game(&installed).unwrap();
+
+    let log_path = dir.path().join("logs/12.log");
+    let opts = LaunchOptions {
+        auto_sync_on_close: false,
+        sync_settle_delay: Duration::ZERO,
+        heartbeat_interval: Duration::from_millis(50),
+        extra_env: vec![("OPENSYNC_TEST_VAR".to_string(), "hello".to_string())],
+        log_path: Some(log_path.clone()),
+        ..LaunchOptions::default()
+    };
+    launch_and_track(&db, None, &installed, None, opts)
+        .await
+        .unwrap();
+
+    let log = fs::read_to_string(&log_path).unwrap();
+    assert!(log.contains("CUSTOM=hello"), "unexpected log: {log}");
+    assert!(log.contains("ERROR_LINE=1"), "unexpected log: {log}");
+    assert!(log.contains("runtime: native"), "unexpected log: {log}");
+
+    // Oversized logs (> 5 MB) rotate to .old.log on the next launch.
+    fs::write(&log_path, vec![b'x'; 5 * 1024 * 1024 + 64]).unwrap();
+    launch_and_track(
+        &db,
+        None,
+        &installed,
+        None,
+        LaunchOptions {
+            auto_sync_on_close: false,
+            sync_settle_delay: Duration::ZERO,
+            heartbeat_interval: Duration::from_millis(50),
+            log_path: Some(log_path.clone()),
+            ..LaunchOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let rotated = log_path.with_extension("old.log");
+    assert!(rotated.is_file(), "expected rotated old log at {rotated:?}");
+    assert!(fs::metadata(&log_path).unwrap().len() < 4096);
+}
 
 #[test]
 fn tracking_session_clock_excludes_system_suspend_sleep_jumps() {
@@ -94,6 +240,7 @@ async fn tracking_records_real_process_sessions_and_accumulates_playtime() {
         heartbeat_interval: Duration::from_millis(250),
         extra_args: vec![],
         prefixes_root: dir.path().join("prefixes"),
+        ..LaunchOptions::default()
     };
 
     let first = launch_and_track(&db, None, &installed, None, opts.clone())

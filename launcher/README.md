@@ -75,6 +75,8 @@ Key features:
 * **Wire-speed streaming downloads** — zero-temp-file ZIP extraction, path-traversal protection, inline SHA-256 verification, pause/resume/cancel, bandwidth cap, and a 60fps Download Manager waveform
 * **Automatic background & post-exit save sync** — parallel `rayon` hashing against the clean manifest, concurrent 4 MB chunked overlay uploads, mass-deletion guard, offline pending queue, and periodic background flush
 * **Proton auto-detection & installer** — discovers OpenSync-managed, Steam `compatibilitytools.d`, Steam `common`, and Flatpak Steam Proton builds; offers one-click SHA-512 verified GE-Proton downloads with per-game WINE prefix isolation
+* **Per-game launch options** — set a custom Wine/Proton prefix (with a folder picker), quote-aware launch arguments, and environment variables that override the runtime's defaults. Options can be saved while a game is still being set up, before it is downloaded.
+* **Game output logs** — stdout and stderr from each launch are captured to `logs/<game_id>.log` in the launcher data directory; the game's settings page shows them alongside its save-sync activity.
 * **Native macOS support** — discovers `.app` bundles and Mach-O (thin/fat) binaries, launches bundles with `open -W`, and optionally uses a configured Wine/Whisky/CrossOver runner for Windows titles; works on both Apple Silicon and Intel Macs
 * **Screen-time & controller support** — cumulative playtime tracking per game, full W3C Gamepad API + keyboard spatial navigation with bottom control hints, and OpenSync Web's dark `2:3` Steam capsule UI
 * **Profile & avatar sync** — view account activity, upload or remove your profile picture, customize instance labels, and display synced avatars across the launcher
@@ -203,7 +205,7 @@ the dark window background.
 
 | Env var | Default | Description |
 | --- | --- | --- |
-| `OPENSYNC_LAUNCHER_DATA` | macOS: `~/Library/Application Support/opensync-launcher`; Linux: `$XDG_DATA_HOME/opensync-launcher` or `~/.local/share/opensync-launcher`; Windows: `%APPDATA%/opensync-launcher` | App data dir (SQLite DB, `secrets.json`, prefixes, Proton installs, cover/avatar cache). macOS never uses `$XDG_DATA_HOME`. |
+| `OPENSYNC_LAUNCHER_DATA` | macOS: `~/Library/Application Support/opensync-launcher`; Linux: `$XDG_DATA_HOME/opensync-launcher` or `~/.local/share/opensync-launcher`; Windows: `%APPDATA%/opensync-launcher` | App data dir (SQLite DB, `secrets.json`, prefixes, game output logs, Proton installs, cover/avatar cache). macOS never uses `$XDG_DATA_HOME`. |
 | `OPENSYNC_LAUNCHER_GAMES_DIR` | `~/Games/OpenSync` | Override destination root for newly downloaded games (also editable in Settings) |
 | `OPENSYNC_MACOS_COMPAT_RUNNER`, `OPENSYNC_MACOS_WINE`, `OPENSYNC_MACOS_WHISKY`, `OPENSYNC_MACOS_CROSSOVER` | unset | Optional Wine-compatible runner path for Windows games on macOS. Without one, Windows PE titles fall back to native execution. |
 

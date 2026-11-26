@@ -91,6 +91,14 @@ pub struct Profile {
     pub last_connected_at: Option<DateTime<Utc>>,
 }
 
+/// A single user-supplied environment variable for a game launch. Stored as JSON text in
+/// `game_launch_configs.env_vars` so ordering can be preserved in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GameEnvVar {
+    pub key: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstalledGame {
     pub profile_id: String,
@@ -104,6 +112,19 @@ pub struct InstalledGame {
     pub installed_at: DateTime<Utc>,
     pub last_synced_at: Option<DateTime<Utc>>,
     pub proton_override: Option<String>,
+}
+
+/// Per-game launch configuration. Kept separate from `installed_games` so options can be
+/// configured while a game is still being downloaded — or before it is downloaded at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GameLaunchConfig {
+    pub profile_id: String,
+    pub game_id: i64,
+    /// Custom Wine/Proton prefix. `None` uses the automatic per-game prefix.
+    pub wine_prefix: Option<String>,
+    /// Raw launch argument string (quote-aware splitting happens at launch time).
+    pub launch_args: Option<String>,
+    pub env_vars: Vec<GameEnvVar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -446,6 +467,25 @@ impl LauncherDb {
                 "#,
             )?;
         }
+
+        // v2: per-game launch configuration lives in its own table so it can be saved before
+        // a game is installed. Existing installs skip the CREATE block above, hence the
+        // separate `IF NOT EXISTS` step here.
+        if schema_version < 2 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS game_launch_configs (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    game_id INTEGER NOT NULL,
+                    wine_prefix TEXT,
+                    launch_args TEXT,
+                    env_vars TEXT,
+                    PRIMARY KEY (profile_id, game_id)
+                );
+                PRAGMA user_version = 2;
+                "#,
+            )?;
+        }
         Ok(())
     }
 
@@ -741,6 +781,65 @@ impl LauncherDb {
         )?
         .execute(params![proton_name, profile_id, game_id])?;
         Ok(())
+    }
+
+    /// Persists the custom prefix, argument string and environment variables in one write so
+    /// the settings panel saves atomically. Works even before the game has been installed.
+    pub fn upsert_game_launch_config(&self, config: &GameLaunchConfig) -> DbResult<()> {
+        let conn = self.conn.lock();
+        let env_json = serde_json::to_string(&config.env_vars)?;
+        conn.prepare_cached(
+            r#"
+            INSERT INTO game_launch_configs (
+                profile_id, game_id, wine_prefix, launch_args, env_vars
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(profile_id, game_id) DO UPDATE SET
+                wine_prefix = excluded.wine_prefix,
+                launch_args = excluded.launch_args,
+                env_vars = excluded.env_vars
+            "#,
+        )?
+        .execute(params![
+            config.profile_id,
+            config.game_id,
+            config.wine_prefix,
+            config.launch_args,
+            env_json,
+        ])?;
+        Ok(())
+    }
+
+    pub fn get_game_launch_config(
+        &self,
+        profile_id: &str,
+        game_id: i64,
+    ) -> DbResult<Option<GameLaunchConfig>> {
+        let conn = self.conn.lock();
+        conn.prepare_cached(
+            r#"
+            SELECT profile_id, game_id, wine_prefix, launch_args, env_vars
+            FROM game_launch_configs WHERE profile_id = ?1 AND game_id = ?2
+            "#,
+        )?
+        .query_row(params![profile_id, game_id], Self::row_to_launch_config)
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_game_launch_configs(&self, profile_id: &str) -> DbResult<Vec<GameLaunchConfig>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT profile_id, game_id, wine_prefix, launch_args, env_vars
+            FROM game_launch_configs WHERE profile_id = ?1
+            "#,
+        )?;
+        let rows = stmt.query_map(params![profile_id], Self::row_to_launch_config)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub fn remove_installed_game(&self, profile_id: &str, game_id: i64) -> DbResult<()> {
@@ -1225,6 +1324,25 @@ impl LauncherDb {
             proton_override: r.get(10)?,
         })
     }
+
+    fn row_to_launch_config(r: &rusqlite::Row<'_>) -> rusqlite::Result<GameLaunchConfig> {
+        Ok(GameLaunchConfig {
+            profile_id: r.get(0)?,
+            game_id: r.get(1)?,
+            wine_prefix: r.get(2)?,
+            launch_args: r.get(3)?,
+            env_vars: parse_env_vars(r.get::<_, Option<String>>(4)?.as_deref()),
+        })
+    }
+}
+
+/// Corrupt or legacy JSON is treated as "no custom variables" rather than failing to load
+/// a game into the library.
+fn parse_env_vars(raw: Option<&str>) -> Vec<GameEnvVar> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
@@ -1320,5 +1438,82 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index_exists, 1);
+    }
+
+    #[test]
+    fn launch_config_round_trips_without_requiring_an_install() {
+        let db = LauncherDb::open_in_memory().unwrap();
+        let profile = db
+            .upsert_profile("LAN", "http://127.0.0.1:3000", "valerio", 1, "admin")
+            .unwrap();
+        let config = GameLaunchConfig {
+            profile_id: profile.id.clone(),
+            game_id: 42,
+            wine_prefix: Some("/home/user/prefixes/game".to_string()),
+            launch_args: Some("-windowed --save-dir=\"my saves\"".to_string()),
+            env_vars: vec![
+                GameEnvVar {
+                    key: "DXVK_HUD".to_string(),
+                    value: "full".to_string(),
+                },
+                GameEnvVar {
+                    key: "GAME_ARG".to_string(),
+                    value: "value with spaces".to_string(),
+                },
+            ],
+        };
+
+        db.upsert_game_launch_config(&config).unwrap();
+        let loaded = db.get_game_launch_config(&profile.id, 42).unwrap().unwrap();
+        assert_eq!(loaded, config);
+        assert_eq!(db.list_game_launch_configs(&profile.id).unwrap().len(), 1);
+        assert!(db.get_installed_game(&profile.id, 42).unwrap().is_none());
+    }
+
+    #[test]
+    fn migrates_v1_database_to_v2() {
+        let dir = std::env::temp_dir().join(format!("opensync-db-migrate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("launcher.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                PRAGMA user_version = 1;
+                CREATE TABLE installed_games (
+                    profile_id TEXT NOT NULL,
+                    game_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    install_dir TEXT NOT NULL,
+                    executable_rel_path TEXT,
+                    manifest_hash TEXT,
+                    total_size INTEGER NOT NULL DEFAULT 0,
+                    installed_at TEXT NOT NULL,
+                    last_synced_at TEXT,
+                    proton_override TEXT,
+                    PRIMARY KEY (profile_id, game_id)
+                );
+                "#,
+            )
+            .unwrap();
+        }
+
+        let db = LauncherDb::open(&path).unwrap();
+        let conn = db.conn.lock();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'game_launch_configs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

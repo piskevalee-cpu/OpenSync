@@ -52,6 +52,7 @@ async fn post_close_auto_sync_emits_lifecycle_events_and_records_activity_logs()
                 heartbeat_interval: Duration::from_millis(50),
                 extra_args: vec![],
                 prefixes_root: dir.path().join("prefixes"),
+                ..LaunchOptions::default()
             },
         )
         .await

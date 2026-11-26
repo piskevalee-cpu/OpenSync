@@ -5,7 +5,10 @@ use launcher_core::{
     ConnectionStateDto, CoreError, DownloadJobSnapshot, InterruptedSessionDto, LauncherCore,
     ReconnectPolicy, ShutdownResultDto, ShutdownStatusDto, UploadJobSnapshot, default_games_dir,
 };
-use launcher_db::{ActivityLogEntry, InstalledGame, PendingSync, PlaytimeSummary, Profile};
+use launcher_db::{
+    ActivityLogEntry, GameEnvVar, GameLaunchConfig, InstalledGame, PendingSync, PlaytimeSummary,
+    Profile,
+};
 use opensync_api::{ApiError, Game, User, safe_image_mime};
 use opensync_proton::{
     BinaryKind, DiscoveredExecutable, GeProtonRelease, ProtonInstallation, detect_binary_kind,
@@ -166,6 +169,9 @@ pub struct LibraryGameDto {
     pub discovered_executables: Vec<ExecutableOptionDto>,
     pub binary_kind: Option<BinaryKind>,
     pub proton_override: Option<String>,
+    pub wine_prefix: Option<String>,
+    pub launch_args: Option<String>,
+    pub env_vars: Vec<GameEnvVar>,
     pub last_synced_at: Option<DateTime<Utc>>,
     pub pending_sync: bool,
     pub playtime: PlaytimeSummary,
@@ -499,16 +505,17 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
         return Ok(Vec::new());
     };
 
-    let core_for_playtime = Arc::clone(&state.core);
+    let core_for_db = Arc::clone(&state.core);
     let profile_id = profile.id.clone();
-    let (remote_res, installed_res, pending_res, playtime_res) = tokio::join!(
+    let (remote_res, installed_res, pending_res, db_meta_res) = tokio::join!(
         state.core.fetch_remote_games(),
         state.core.list_downloaded_games(),
         state.core.list_pending_syncs(),
         tokio::task::spawn_blocking(move || {
-            core_for_playtime
-                .db()
-                .playtime_summaries_for_profile(&profile_id)
+            let db = core_for_db.db();
+            let playtime = db.playtime_summaries_for_profile(&profile_id);
+            let configs = db.list_game_launch_configs(&profile_id);
+            (playtime, configs)
         }),
     );
 
@@ -519,7 +526,14 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
         .into_iter()
         .map(|p| p.game_id)
         .collect();
-    let playtime_map = playtime_res.ok().and_then(|r| r.ok()).unwrap_or_default();
+    let (playtime_map, config_list) = match db_meta_res {
+        Ok((playtime, configs)) => (playtime.unwrap_or_default(), configs.unwrap_or_default()),
+        Err(_) => (HashMap::new(), Vec::new()),
+    };
+    let config_map: HashMap<i64, GameLaunchConfig> = config_list
+        .into_iter()
+        .map(|config| (config.game_id, config))
+        .collect();
 
     let mut installed_map: HashMap<i64, InstalledGame> = installed_games
         .into_iter()
@@ -694,6 +708,16 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
             discovered_executables,
             binary_kind,
             proton_override: inst.as_ref().and_then(|i| i.proton_override.clone()),
+            wine_prefix: config_map
+                .get(&remote.id)
+                .and_then(|c| c.wine_prefix.clone()),
+            launch_args: config_map
+                .get(&remote.id)
+                .and_then(|c| c.launch_args.clone()),
+            env_vars: config_map
+                .get(&remote.id)
+                .map(|c| c.env_vars.clone())
+                .unwrap_or_default(),
             last_synced_at: inst.as_ref().and_then(|i| i.last_synced_at),
             pending_sync: pending_set.contains(&remote.id),
             playtime,
@@ -736,6 +760,12 @@ pub async fn list_library(state: State<'_, AppState>) -> Result<Vec<LibraryGameD
             discovered_executables,
             binary_kind,
             proton_override: inst.proton_override,
+            wine_prefix: config_map.get(&gid).and_then(|c| c.wine_prefix.clone()),
+            launch_args: config_map.get(&gid).and_then(|c| c.launch_args.clone()),
+            env_vars: config_map
+                .get(&gid)
+                .map(|c| c.env_vars.clone())
+                .unwrap_or_default(),
             last_synced_at: inst.last_synced_at,
             pending_sync: pending_set.contains(&gid),
             playtime,
@@ -907,6 +937,32 @@ pub async fn set_game_proton(
     Ok(true)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GameLaunchConfigInput {
+    pub wine_prefix: Option<String>,
+    pub launch_args: Option<String>,
+    #[serde(default)]
+    pub env_vars: Vec<GameEnvVar>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_game_launch_config(
+    state: State<'_, AppState>,
+    game_id: i64,
+    config: GameLaunchConfigInput,
+) -> Result<GameLaunchConfig, String> {
+    state
+        .core
+        .set_game_launch_config(
+            game_id,
+            config.wine_prefix,
+            config.launch_args,
+            config.env_vars,
+        )
+        .await
+        .map_err(err_str)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_proton_installations(
     state: State<'_, AppState>,
@@ -948,60 +1004,61 @@ pub async fn change_username(
 
 /// Opens a native directory picker using whichever desktop dialog tool is installed.
 /// Returns `None` when the dialog is unavailable or the user cancels.
+fn pick_directory(prompt: &'static str) -> Option<String> {
+    fn try_dialog(program: &str, args: &[&str]) -> Option<String> {
+        let output = std::process::Command::new(program)
+            .args(args)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    #[cfg(target_os = "windows")]
+    let picked = {
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '{prompt}'; if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }}"
+        );
+        try_dialog("powershell", &["-NoProfile", "-Command", &script])
+    };
+
+    #[cfg(target_os = "macos")]
+    let picked = {
+        let script = format!("set p to choose folder with prompt \"{prompt}\"");
+        try_dialog(
+            "osascript",
+            &["-e", &script, "-e", "return POSIX path of p"],
+        )
+    };
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let picked = {
+        let title = format!("--title={prompt}");
+        try_dialog("zenity", &["--file-selection", "--directory", &title])
+            .or_else(|| try_dialog("kdialog", &["--getexistingdirectory", "/home", &title]))
+            .or_else(|| try_dialog("yad", &["--file-selection", "--directory", &title]))
+    };
+
+    picked
+}
+
+async fn pick_directory_command(prompt: &'static str) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || pick_directory(prompt))
+        .await
+        .map_err(|e| format!("folder dialog failed: {e}"))
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn pick_upload_folder() -> Result<Option<String>, String> {
-    tokio::task::spawn_blocking(|| {
-        fn try_dialog(program: &str, args: &[&str]) -> Option<String> {
-            let output = std::process::Command::new(program).args(args).output().ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        }
+    pick_directory_command("Choose game folder").await
+}
 
-        #[cfg(target_os = "windows")]
-        let picked = try_dialog(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose game folder'; if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }",
-            ],
-        );
-
-        #[cfg(target_os = "macos")]
-        let picked = try_dialog(
-            "osascript",
-            &[
-                "-e",
-                "set p to choose folder with prompt \"Choose game folder\"",
-                "-e",
-                "return POSIX path of p",
-            ],
-        );
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        let picked = try_dialog(
-            "zenity",
-            &["--file-selection", "--directory", "--title=Choose game folder"],
-        )
-        .or_else(|| try_dialog("kdialog", &["--getexistingdirectory", "/home"]))
-        .or_else(|| {
-            try_dialog(
-                "yad",
-                &["--file-selection", "--directory", "--title=Choose game folder"],
-            )
-        });
-
-        picked
-    })
-    .await
-    .map_err(|e| format!("folder dialog failed: {e}"))
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pick_wine_prefix_dir() -> Result<Option<String>, String> {
+    pick_directory_command("Choose Wine prefix folder").await
 }
 
 fn collect_upload_files(
@@ -1256,6 +1313,40 @@ pub async fn list_activity_logs(
 #[tauri::command(rename_all = "snake_case")]
 pub async fn clear_activity_logs(state: State<'_, AppState>) -> Result<bool, String> {
     state.core.clear_activity_logs().await.map_err(err_str)?;
+    Ok(true)
+}
+
+/// Tail of a game's captured stdout/stderr. `None` means the game has not been launched yet.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_game_log(
+    state: State<'_, AppState>,
+    game_id: i64,
+    max_bytes: Option<usize>,
+) -> Result<Option<String>, String> {
+    let profile = state
+        .core
+        .active_profile()
+        .await
+        .ok_or_else(|| "no active profile".to_string())?;
+    let core = Arc::clone(&state.core);
+    let capped = max_bytes.unwrap_or(64 * 1024).min(512 * 1024);
+    tokio::task::spawn_blocking(move || core.read_game_log(&profile.id, game_id, capped))
+        .await
+        .map_err(|e| format!("log read failed: {e}"))?
+        .map_err(err_str)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn clear_game_log(state: State<'_, AppState>, game_id: i64) -> Result<bool, String> {
+    let profile = state
+        .core
+        .active_profile()
+        .await
+        .ok_or_else(|| "no active profile".to_string())?;
+    state
+        .core
+        .clear_game_log(&profile.id, game_id)
+        .map_err(err_str)?;
     Ok(true)
 }
 

@@ -2537,9 +2537,44 @@ function renderGameDetailView() {
           <label>Compatibility runtime</label>
           <div id="detail-proton-host"></div>
         </div>
-        <div class="field" style="margin-bottom:0;">
+        <div class="field">
           <label>Launch executable</label>
           <div id="detail-exe-host"></div>
+        </div>
+        <details class="launch-advanced" id="detail-launch-advanced"${g.wine_prefix || g.launch_args || (g.env_vars && g.env_vars.length) ? ' open' : ''}>
+          <summary class="launch-advanced-summary">
+            <span class="launch-advanced-chevron" aria-hidden="true">${icon('chevron-down', 14)}</span>
+            <span>Advanced launch options</span>
+          </summary>
+          <div class="launch-advanced-body">
+            <div class="field">
+              <label for="detail-prefix-input">Wine prefix</label>
+              <div class="launch-path-row">
+                <input class="input" id="detail-prefix-input" type="text" spellcheck="false"
+                  value="${esc(g.wine_prefix || '')}"
+                  placeholder="Automatic (per-game prefix)" />
+                <button type="button" class="btn" id="btn-detail-browse-prefix" title="Choose a prefix folder">${icon('folder', 14)}<span>Browse</span></button>
+              </div>
+              <span class="small faint">Leave blank to use the automatic per-game prefix.</span>
+            </div>
+            <div class="field">
+              <label for="detail-args-input">Game arguments</label>
+              <input class="input" id="detail-args-input" type="text" spellcheck="false"
+                value="${esc(g.launch_args || '')}"
+                placeholder="-windowed --save-dir=&quot;my saves&quot;" />
+              <span class="small faint">Quotes keep spaces together in a single argument.</span>
+            </div>
+            <div class="field" style="margin-bottom:0;">
+              <label>Environment variables</label>
+              <div class="env-var-list" id="detail-env-rows"></div>
+              <button type="button" class="btn btn-ghost btn-sm env-var-add" id="btn-detail-add-env">${icon('plus', 14)}<span>Add variable</span></button>
+            </div>
+          </div>
+        </details>
+        <div class="launch-actions-row">
+          <button type="button" class="btn btn-primary btn-sm" id="btn-detail-save-launch">${icon('check', 14)}<span>Save launch options</span></button>
+          <button type="button" class="btn btn-sm" id="btn-detail-show-logs">${icon('hard-drive', 14)}<span>Show logs</span></button>
+          <span class="launch-dirty-hint" id="detail-launch-dirty" hidden>Unsaved changes</span>
         </div>
       </section>
 
@@ -2657,6 +2692,105 @@ function renderGameDetailView() {
     },
   });
   document.getElementById('detail-exe-host')?.appendChild(exeSelect.element);
+
+  const envRowsHost = document.getElementById('detail-env-rows');
+  const dirtyHint = document.getElementById('detail-launch-dirty');
+  const setLaunchDirty = (dirty) => {
+    if (dirtyHint) dirtyHint.hidden = !dirty;
+  };
+  const appendEnvVarRow = (entry = { key: '', value: '' }) => {
+    if (!envRowsHost) return null;
+    const row = document.createElement('div');
+    row.className = 'env-var-row';
+    row.innerHTML = `
+      <input class="input env-var-key" type="text" spellcheck="false" aria-label="Variable name"
+        placeholder="KEY" value="${esc(entry.key)}" />
+      <input class="input env-var-value" type="text" spellcheck="false" aria-label="Variable value"
+        placeholder="value" value="${esc(entry.value)}" />
+      <button type="button" class="btn btn-ghost btn-icon env-var-remove" aria-label="Remove variable" title="Remove variable">${icon('x', 14)}</button>
+    `;
+    row.querySelector('.env-var-key')?.addEventListener('input', () => setLaunchDirty(true));
+    row.querySelector('.env-var-value')?.addEventListener('input', () => setLaunchDirty(true));
+    row.querySelector('.env-var-remove')?.addEventListener('click', () => {
+      row.remove();
+      setLaunchDirty(true);
+    });
+    envRowsHost.appendChild(row);
+    return row;
+  };
+  (g.env_vars || []).forEach((entry) => appendEnvVarRow(entry));
+
+  document.getElementById('detail-prefix-input')?.addEventListener('input', () => setLaunchDirty(true));
+  document.getElementById('detail-args-input')?.addEventListener('input', () => setLaunchDirty(true));
+
+  document.getElementById('btn-detail-add-env')?.addEventListener('click', () => {
+    const details = document.getElementById('detail-launch-advanced');
+    if (details) details.open = true;
+    const row = appendEnvVarRow();
+    setLaunchDirty(true);
+    row?.querySelector('.env-var-key')?.focus();
+  });
+
+  document.getElementById('btn-detail-browse-prefix')?.addEventListener('click', async () => {
+    try {
+      const picked = await bridge.pickWinePrefixDir();
+      if (picked) {
+        const input = document.getElementById('detail-prefix-input');
+        if (input) input.value = picked;
+        setLaunchDirty(true);
+      }
+    } catch (err) {
+      showToast(String(err?.message || err), 'danger', 'alert-triangle');
+    }
+  });
+
+  document.getElementById('btn-detail-save-launch')?.addEventListener('click', async () => {
+    const prefixInput = document.getElementById('detail-prefix-input');
+    const argsInput = document.getElementById('detail-args-input');
+    const envVars = Array.from(envRowsHost?.querySelectorAll('.env-var-row') || [])
+      .map((row) => ({
+        key: row.querySelector('.env-var-key')?.value || '',
+        value: row.querySelector('.env-var-value')?.value || '',
+      }))
+      .filter((v) => v.key.trim() || v.value.length > 0);
+    const invalid = envVars.find(
+      (v) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v.key.trim()),
+    );
+    if (invalid) {
+      showToast(
+        'Environment variable names must use A-Z, 0-9 and _, and cannot start with a digit',
+        'danger',
+        'alert-triangle',
+      );
+      return;
+    }
+    const prefix = prefixInput?.value || '';
+    const args = argsInput?.value || '';
+    try {
+      const saved = await bridge.setGameLaunchConfig(g.game_id, {
+        wine_prefix: prefix,
+        launch_args: args,
+        env_vars: envVars,
+      });
+      g.wine_prefix = saved?.wine_prefix ?? (prefix.trim() || null);
+      g.launch_args = saved?.launch_args ?? (args.trim() || null);
+      g.env_vars = saved?.env_vars ?? envVars;
+      if (prefixInput) prefixInput.value = g.wine_prefix || '';
+      if (argsInput) argsInput.value = g.launch_args || '';
+      if (envRowsHost) {
+        envRowsHost.innerHTML = '';
+        (g.env_vars || []).forEach((entry) => appendEnvVarRow(entry));
+      }
+      setLaunchDirty(false);
+      showToast('Launch options saved', 'accent', 'check');
+    } catch (err) {
+      showToast(String(err?.message || err), 'danger', 'alert-triangle');
+    }
+  });
+
+  document.getElementById('btn-detail-show-logs')?.addEventListener('click', () => {
+    openGameLogsModal(g);
+  });
 }
 
 // ---------- View 3: Download Manager (60fps Waveform) ----------
@@ -4448,6 +4582,88 @@ function openLightbox(src, alt) {
   document.getElementById('lightbox-close-btn')?.addEventListener('click', close);
   document.getElementById('lightbox-bg')?.addEventListener('click', (e) => {
     if (e.target.id === 'lightbox-bg') close();
+  });
+  gamepadCtrl?.onViewRendered();
+}
+
+function openGameLogsModal(game) {
+  const renderActivity = () => {
+    const host = document.getElementById('game-log-activity');
+    if (!host) return;
+    const entries = state.activityLogs.filter((l) => l.game_id === game.game_id);
+    host.innerHTML = entries.length
+      ? `<div class="activity-list">${entries.map(renderActivityItemHtml).join('')}</div>`
+      : '<p class="small muted">No launch or save sync events recorded for this game yet.</p>';
+  };
+  const loadOutput = async () => {
+    const host = document.getElementById('game-log-output');
+    if (!host) return;
+    try {
+      const text = await bridge.getGameLog(game.game_id);
+      host.textContent = text || 'No game output captured yet. Launch the game to generate a log.';
+      host.classList.toggle('is-empty', !text);
+    } catch (err) {
+      host.textContent = `Could not read the game log: ${err?.message || err}`;
+      host.classList.add('is-empty');
+    }
+  };
+
+  modalRoot.innerHTML = `
+    <div class="modal-backdrop" id="game-logs-modal-bg">
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-label="Logs for ${esc(game.name)}">
+        <div class="modal-header">
+          <h2>Logs · ${esc(game.name)}</h2>
+          <button type="button" class="btn btn-ghost btn-icon" id="game-logs-close-x" aria-label="Close">${icon('x', 16)}</button>
+        </div>
+        <div class="game-log-section">
+          <div class="game-log-section-head">
+            <h3>Game output</h3>
+            <div class="game-log-tools">
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-game-log-refresh">${icon('refresh-cw', 13)}<span>Refresh</span></button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-game-log-clear">${icon('trash-2', 13)}<span>Clear</span></button>
+            </div>
+          </div>
+          <pre class="game-log-output" id="game-log-output">Loading…</pre>
+          <p class="small faint">Captures stdout and stderr from the last game launch (most recent 64 KB).</p>
+        </div>
+        <div class="game-log-section">
+          <div class="game-log-section-head">
+            <h3>Sync and launch activity</h3>
+          </div>
+          <div id="game-log-activity"></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="game-logs-done">Done</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  renderActivity();
+  loadOutput();
+  document.getElementById('game-logs-close-x')?.addEventListener('click', closeModal);
+  document.getElementById('game-logs-done')?.addEventListener('click', closeModal);
+  document.getElementById('game-logs-modal-bg')?.addEventListener('click', (e) => {
+    if (e.target.id === 'game-logs-modal-bg') closeModal();
+  });
+  document.getElementById('game-logs-close-x')?.focus();
+  document.getElementById('btn-game-log-refresh')?.addEventListener('click', async () => {
+    await loadOutput();
+    try {
+      state.activityLogs = await bridge.listActivityLogs(80);
+      renderActivity();
+    } catch (err) {
+      showToast(String(err?.message || err), 'danger', 'alert-triangle');
+    }
+  });
+  document.getElementById('btn-game-log-clear')?.addEventListener('click', async () => {
+    try {
+      await bridge.clearGameLog(game.game_id);
+      await loadOutput();
+      showToast('Game output cleared', 'accent', 'trash-2');
+    } catch (err) {
+      showToast(String(err?.message || err), 'danger', 'alert-triangle');
+    }
   });
   gamepadCtrl?.onViewRendered();
 }
