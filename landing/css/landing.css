@@ -1142,6 +1142,94 @@ button {
   color: var(--ink-dim);
 }
 
+/* ---------- Made-with Monochrome Logo Carousel ---------- */
+
+.logos-section {
+  padding-top: 36px;
+  padding-bottom: 42px;
+  border-top: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+  text-align: center;
+}
+
+.logos-eyebrow {
+  margin: 0 0 22px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink-dim);
+}
+
+.logos-marquee {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+}
+
+.logos-track {
+  display: flex;
+  width: max-content;
+  will-change: transform;
+  animation: logos-slide 28s linear infinite;
+}
+
+.logos-marquee:hover .logos-track,
+.logos-marquee:focus-within .logos-track {
+  animation-play-state: paused;
+}
+
+.logos-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-right: 16px;
+}
+
+.logo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-radius: 9999px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+  opacity: 0.62;
+  transition:
+    opacity 0.22s var(--ease),
+    background-color 0.22s var(--ease),
+    border-color 0.22s var(--ease),
+    transform 0.22s var(--ease);
+}
+
+.logo-chip img {
+  width: 20px;
+  height: 20px;
+  display: block;
+  flex-shrink: 0;
+  filter: grayscale(1) brightness(1.05);
+}
+
+.logo-chip:hover {
+  opacity: 1;
+  background: var(--pill-tonal);
+  border-color: var(--hairline);
+  transform: translateY(-1.5px);
+}
+
+@keyframes logos-slide {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-50%, 0, 0); }
+}
+
 /* ---------- Footer ---------- */
 
 .footer-inner {
@@ -1231,5 +1319,22 @@ button {
   *, *::before, *::after {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+  .logos-marquee {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .logos-track {
+    width: auto;
+    animation: none;
+    justify-content: center;
+  }
+  .logos-group {
+    flex-wrap: wrap;
+    justify-content: center;
+    padding-right: 0;
+  }
+  .logos-group-dup {
+    display: none;
   }
 }
