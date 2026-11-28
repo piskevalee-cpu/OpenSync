@@ -272,6 +272,7 @@ const state = {
   pendingSyncs: [],
   downloads: [],
   bandwidthLimitBps: 0,
+  discordRpcEnabled: true,
   library: [],
   coverCache: new Map(), // game_id -> dataUrl | null
   coverPending: new Set(),
@@ -3757,12 +3758,14 @@ function renderSettingsView() {
     </div>
 
     <section class="panel" id="settings-account"></section>
+    <section class="panel" id="settings-discord"></section>
     <section class="panel" id="settings-games-dir"></section>
 
     <div id="settings-proton"></div>
     <div id="settings-instances"></div>
   `;
   renderAccountSetting(document.getElementById('settings-account'));
+  renderDiscordSetting(document.getElementById('settings-discord'));
   renderGamesDirSetting(document.getElementById('settings-games-dir'));
   renderProtonSection(document.getElementById('settings-proton'));
   renderProfilesSection(document.getElementById('settings-instances'));
@@ -3793,6 +3796,31 @@ async function applyGamesDir(value) {
   } catch (err) {
     showToast(String(err?.message || err), 'danger', 'alert-triangle');
   }
+}
+
+// ---------- Settings section: Discord Rich Presence ----------
+
+function renderDiscordSetting(host) {
+  host.innerHTML = `
+    <h2>Discord Rich Presence</h2>
+    <p class="small muted">Share your OpenSync activity with Discord. While idling (including the sign-in screen) it shows the OpenSync logo; while playing, it shows the game name and cover.</p>
+    <label class="settings-toggle">
+      <input type="checkbox" id="discord-rpc-toggle" ${state.discordRpcEnabled ? 'checked' : ''} />
+      <span class="settings-toggle-track" aria-hidden="true"></span>
+      <span class="settings-toggle-label">Show my OpenSync activity on Discord</span>
+    </label>
+    <p class="small faint">On by default. Discord must be running on this device. Game covers use Discord assets named <code>cover_&lt;slug&gt;</code>.</p>
+  `;
+  host.querySelector('#discord-rpc-toggle')?.addEventListener('change', async (e) => {
+    const enabled = e.target.checked;
+    try {
+      state.discordRpcEnabled = await bridge.setDiscordRpcEnabled(enabled);
+      showToast(enabled ? 'Discord Rich Presence enabled' : 'Discord Rich Presence disabled', 'accent', enabled ? 'check' : 'x');
+    } catch (err) {
+      e.target.checked = !enabled;
+      showToast(String(err?.message || err), 'danger', 'alert-triangle');
+    }
+  });
 }
 
 // ---------- Settings section: Proton & Compatibility ----------
@@ -4974,6 +5002,7 @@ async function refreshAll() {
   state.downloads = (boot.downloads || []).map(normalizeDownloadJob).filter(Boolean);
   state.bandwidthLimitBps = Number(boot.bandwidth_limit_bps || 0);
   state.gamesDir = boot.games_dir || '';
+  state.discordRpcEnabled = boot.discord_rpc_enabled !== false;
   if (Array.isArray(boot.activity_logs)) {
     state.activityLogs = boot.activity_logs;
   }

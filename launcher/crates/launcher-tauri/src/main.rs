@@ -3,8 +3,11 @@
 mod commands;
 
 use commands::AppState;
-use launcher_core::{LauncherCore, LauncherPaths, default_data_dir, default_games_dir};
+use launcher_core::{
+    LauncherCore, LauncherEvent, LauncherPaths, default_data_dir, default_games_dir,
+};
 use launcher_db::{FileSecretStore, LauncherDb};
+use opensync_discord::{DiscordPresence, PresenceState};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,10 +74,26 @@ fn main() {
         tracing::error!(path = %games_dir.display(), error = %err, "failed to create games directory");
     }
 
+    // Absent setting means enabled: Discord Rich Presence is on by default.
+    let discord_enabled = !matches!(
+        db.get_setting("discord_rpc_enabled")
+            .ok()
+            .flatten()
+            .as_deref(),
+        Some("false")
+    );
+
     let mut paths = LauncherPaths::under(&data_root);
     paths.library_root = games_dir;
     let core = Arc::new(LauncherCore::new(db, secrets, paths));
-    let app_state = AppState::new(Arc::clone(&core));
+    let discord_client_id = std::env::var("OPENSYNC_DISCORD_CLIENT_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| opensync_discord::DEFAULT_CLIENT_ID.to_string());
+    let discord = Arc::new(DiscordPresence::new(discord_client_id, discord_enabled));
+    // Launcher startup doubles as the idle state (including the login screen).
+    discord.set_state(PresenceState::Idle);
+    let app_state = AppState::new(Arc::clone(&core), Arc::clone(&discord));
 
     tauri::Builder::default()
         .manage(app_state)
@@ -90,6 +109,7 @@ fn main() {
             let core_for_events = Arc::clone(&state.core);
             let core_for_restore = Arc::clone(&state.core);
             let core_for_auto_sync = Arc::clone(&state.core);
+            let discord_for_events = Arc::clone(&state.discord);
 
             let mut rx = core_for_events.subscribe_events();
             tauri::async_runtime::spawn(async move {
@@ -103,6 +123,28 @@ fn main() {
                         Err(RecvError::Lagged(skipped)) => {
                             tracing::debug!(skipped, "launcher event receiver lagged");
                         }
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
+
+            // Mirror play sessions into Discord presence. GameSessionEnded also fires
+            // on a failed launch, so the fallback state is always idling.
+            let mut discord_rx = state.core.subscribe_events();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match discord_rx.recv().await {
+                        Ok(LauncherEvent::GameSessionStarted { name, slug, .. }) => {
+                            discord_for_events.set_state(PresenceState::Playing {
+                                game_name: name,
+                                slug,
+                            });
+                        }
+                        Ok(LauncherEvent::GameSessionEnded { .. }) => {
+                            discord_for_events.set_state(PresenceState::Idle);
+                        }
+                        Ok(_) => {}
+                        Err(RecvError::Lagged(_)) => {}
                         Err(RecvError::Closed) => break,
                     }
                 }
@@ -139,6 +181,7 @@ fn main() {
                     state
                         .allow_window_close
                         .store(true, std::sync::atomic::Ordering::SeqCst);
+                    state.discord.shutdown();
                 } else {
                     api.prevent_close();
                     state.core.request_shutdown_check();
@@ -195,6 +238,8 @@ fn main() {
             commands::get_bootstrap_state,
             commands::get_games_dir,
             commands::set_games_dir,
+            commands::get_discord_rpc_enabled,
+            commands::set_discord_rpc_enabled,
             commands::connect_profile,
             commands::switch_profile,
             commands::delete_profile,

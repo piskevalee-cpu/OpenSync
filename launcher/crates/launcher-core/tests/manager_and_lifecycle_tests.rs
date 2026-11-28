@@ -513,7 +513,11 @@ async fn uninstall_overrides_pending_syncs_events_and_delete_profile_cleanup() {
     let mut saw_ended = false;
     while let Ok(ev) = events.try_recv() {
         match ev {
-            LauncherEvent::GameSessionStarted { game_id, name } => {
+            LauncherEvent::GameSessionStarted {
+                game_id,
+                name,
+                ..
+            } => {
                 assert_eq!(game_id, 11);
                 assert_eq!(name, "OverrideTest");
                 saw_started = true;

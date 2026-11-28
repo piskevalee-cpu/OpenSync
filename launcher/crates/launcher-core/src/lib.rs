@@ -215,6 +215,7 @@ pub enum LauncherEvent {
     GameSessionStarted {
         game_id: i64,
         name: String,
+        slug: String,
     },
     GameSessionEnded {
         game_id: i64,
@@ -2984,6 +2985,7 @@ impl LauncherCore {
         self.emit(LauncherEvent::GameSessionStarted {
             game_id,
             name: installed.name.clone(),
+            slug: installed.slug.clone(),
         });
 
         let auto_sync_on_close = options.auto_sync_on_close;

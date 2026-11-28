@@ -72,7 +72,11 @@ async fn post_close_auto_sync_emits_lifecycle_events_and_records_activity_logs()
 
     while let Ok(evt) = rx.try_recv() {
         match evt {
-            LauncherEvent::GameSessionStarted { game_id, name } => {
+            LauncherEvent::GameSessionStarted {
+                game_id,
+                name,
+                ..
+            } => {
                 assert_eq!(game_id, 31);
                 assert_eq!(name, "ChronoBlade");
                 saw_session_started = true;

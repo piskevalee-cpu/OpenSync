@@ -209,6 +209,20 @@ the dark window background.
 | `OPENSYNC_LAUNCHER_GAMES_DIR` | `~/Games/OpenSync` | Override destination root for newly downloaded games (also editable in Settings) |
 | `OPENSYNC_MACOS_COMPAT_RUNNER`, `OPENSYNC_MACOS_WINE`, `OPENSYNC_MACOS_WHISKY`, `OPENSYNC_MACOS_CROSSOVER` | unset | Optional Wine-compatible runner path for Windows games on macOS. Without one, Windows PE titles fall back to native execution. |
 
+### Discord Rich Presence
+
+The launcher publishes your status to Discord on **Linux, macOS, and Windows**. It is **on by default** and can be switched off under **Settings → Discord Rich Presence**.
+
+- Idling (including the sign-in screen): `Idling` / `OpenSync`, with the OpenSync logo.
+- Playing a game: the game name, `OpenSync`, and the game cover.
+
+| Env var | Default | Description |
+| --- | --- | --- |
+| `OPENSYNC_DISCORD_CLIENT_ID` | placeholder ID | Discord application Client ID. Create an app at <https://discord.com/developers/applications> and set this to its ID; the placeholder does not display anything until replaced with your own. |
+| `OPENSYNC_DISCORD_LOGO` | public OpenSync logo URL | Image URL or uploaded Discord asset key used for the idle logo. |
+
+Discord asset keys for covers are `cover_<slug>` (e.g. `cover_fogwoods`). Upload your cover art under those names in **Rich Presence → Art Assets** for each game. Games without a matching asset still show the game name and `OpenSync` text. Discord must be running locally; the launcher reconnects automatically when it starts or restarts. Flatpak's sandbox may hide Discord's IPC socket — use the AppImage on Linux if presence does not appear.
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- USAGE -->

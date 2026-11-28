@@ -7,6 +7,7 @@ members = [
     "crates/opensync-sync",
     "crates/opensync-proton",
     "crates/opensync-runner",
+    "crates/opensync-discord",
     "crates/launcher-core",
     "crates/launcher-tauri",
 ]
@@ -17,6 +18,7 @@ default-members = [
     "crates/opensync-sync",
     "crates/opensync-proton",
     "crates/opensync-runner",
+    "crates/opensync-discord",
     "crates/launcher-core",
 ]
 
@@ -33,6 +35,7 @@ base64 = "0.22"
 bytes = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
 crc32fast = "1.4"
+discord-rich-presence = "0.2.4"
 flate2 = "1.1"
 futures-util = "0.3"
 hex = "0.4"

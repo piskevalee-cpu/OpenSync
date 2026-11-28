@@ -225,6 +225,7 @@ function createMockRuntime() {
   };
 
   let bandwidthLimit = 0;
+  let discordRpcEnabled = true;
   let gamesDir = '/home/user/Games/OpenSync';
   let nextJobSeq = 2;
   const uploads = [];
@@ -815,6 +816,7 @@ function createMockRuntime() {
             downloads: downloads.map(cloneJob),
             bandwidth_limit_bps: bandwidthLimit,
             games_dir: gamesDir,
+            discord_rpc_enabled: discordRpcEnabled,
             activity_logs: activityLogs
               .filter((l) => l.profile_id === activeProfileId)
               .map((l) => ({ ...l })),
@@ -832,6 +834,14 @@ function createMockRuntime() {
           if (!raw) throw new Error('Games directory cannot be empty');
           gamesDir = raw === 'auto' ? '/home/user/Games/OpenSync' : raw;
           return gamesDir;
+        }
+
+        case 'get_discord_rpc_enabled':
+          return discordRpcEnabled;
+
+        case 'set_discord_rpc_enabled': {
+          discordRpcEnabled = Boolean(args.enabled);
+          return discordRpcEnabled;
         }
 
         case 'connect_profile': {
@@ -1671,6 +1681,8 @@ export const bridge = {
   getBootstrapState: () => invokeCmd('get_bootstrap_state'),
   getGamesDir: () => invokeCmd('get_games_dir'),
   setGamesDir: (path) => invokeCmd('set_games_dir', { path }),
+  getDiscordRpcEnabled: () => invokeCmd('get_discord_rpc_enabled'),
+  setDiscordRpcEnabled: (enabled) => invokeCmd('set_discord_rpc_enabled', { enabled }),
   connectProfile: ({ label, server_url, username, password, register = false }) =>
     invokeCmd('connect_profile', { label, server_url, username, password, register }),
   switchProfile: (profile_id) => invokeCmd('switch_profile', { profile_id }),

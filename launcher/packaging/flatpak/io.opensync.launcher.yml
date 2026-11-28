@@ -16,6 +16,8 @@ finish-args:
   - --filesystem=home
   - --filesystem=xdg-run/app/com.valvesoftware.Steam:create
   - --talk-name=org.freedesktop.Notifications
+  # Discord Rich Presence connects to Discord over $XDG_RUNTIME_DIR/discord-ipc-*.
+  - --filesystem=xdg-run/discord-ipc-0
   # Needed by the Flatpak host-launch fallback (flatpak-spawn --host): Proton/Wine
   # needs a complete runtime (notably 32-bit libs) that the GNOME 49 sandbox lacks.
   - --talk-name=org.freedesktop.Flatpak

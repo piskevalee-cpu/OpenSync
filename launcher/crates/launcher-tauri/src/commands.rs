@@ -10,6 +10,7 @@ use launcher_db::{
     Profile,
 };
 use opensync_api::{ApiError, Game, User, safe_image_mime};
+use opensync_discord::DiscordPresence;
 use opensync_proton::{
     BinaryKind, DiscoveredExecutable, GeProtonRelease, ProtonInstallation, detect_binary_kind,
     discover_executables, is_macos_app_bundle,
@@ -40,12 +41,14 @@ pub struct AppState {
     pub exe_cache: Arc<Mutex<HashMap<PathBuf, ExeCacheEntry>>>,
     pub cover_cache: Mutex<HashMap<i64, String>>,
     pub pfp_cache: Mutex<HashMap<(i64, Option<String>), String>>,
+    pub discord: Arc<DiscordPresence>,
 }
 
 impl AppState {
-    pub fn new(core: Arc<LauncherCore>) -> Self {
+    pub fn new(core: Arc<LauncherCore>, discord: Arc<DiscordPresence>) -> Self {
         Self {
             core,
+            discord,
             bandwidth_limit_bps: AtomicU64::new(0),
             allow_window_close: AtomicBool::new(false),
             exe_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -88,6 +91,7 @@ pub struct BootstrapStateDto {
     pub games_dir: String,
     pub activity_logs: Vec<ActivityLogEntry>,
     pub interrupted_sessions: Vec<InterruptedSessionDto>,
+    pub discord_rpc_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +246,7 @@ pub async fn get_bootstrap_state(state: State<'_, AppState>) -> Result<Bootstrap
         games_dir,
         activity_logs,
         interrupted_sessions,
+        discord_rpc_enabled: state.discord.enabled(),
     })
 }
 
@@ -292,6 +297,31 @@ pub async fn set_games_dir(state: State<'_, AppState>, path: String) -> Result<S
     })
     .await
     .map_err(|e| format!("set_games_dir task failed: {e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_discord_rpc_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.discord.enabled())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_discord_rpc_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    let core = Arc::clone(&state.core);
+    tokio::task::spawn_blocking(move || {
+        core.db()
+            .set_setting(
+                "discord_rpc_enabled",
+                if enabled { "true" } else { "false" },
+            )
+            .map_err(err_str)
+    })
+    .await
+    .map_err(|e| format!("set_discord_rpc_enabled task failed: {e}"))??;
+    state.discord.set_enabled(enabled);
+    Ok(enabled)
 }
 
 #[tauri::command(rename_all = "snake_case")]

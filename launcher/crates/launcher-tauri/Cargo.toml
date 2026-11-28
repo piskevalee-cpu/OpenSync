@@ -21,6 +21,7 @@ chrono.workspace = true
 launcher-core = { path = "../launcher-core" }
 launcher-db = { path = "../launcher-db" }
 opensync-api = { path = "../opensync-api" }
+opensync-discord = { path = "../opensync-discord" }
 opensync-proton = { path = "../opensync-proton" }
 opensync-runner = { path = "../opensync-runner" }
 opensync-sync = { path = "../opensync-sync" }
